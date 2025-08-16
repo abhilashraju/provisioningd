@@ -1,0 +1,11 @@
+[Unit]
+Description=Provisioning D-Bus Service
+#After=xyz.openbmc_project.EntityManager.service
+#Requires=xyz.openbmc_project.EntityManager.service
+
+[Service]
+ExecStart=/usr/bin/provisioningd -c /var/provisioning/provisioning.conf
+Restart=always
+
+[Install]
+WantedBy=multi-user.target

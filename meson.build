@@ -8,12 +8,13 @@ executable('provisioningd',
   'src/provisioningd.cpp',
   install: true,
   include_directories:['src'],
+  cpp_args: ['-DBOOST_ASIO_DISABLE_THREADS'],
   dependencies:[reactor_dep,boost_dep,openssl_dep,sdeventplus_dep,sdbusplus_dep],
   install_dir: '/usr/bin'
 )
 
 install_data('service/xyz.openbmc_project.Provisioning.service',
-  install_dir: '/usr/lib/systemd/system'
+  install_dir: '/etc/systemd/system'
 )
 install_data('service/xyz.openbmc_project.Provisioning.conf',
   install_dir:'/etc/dbus-1/system.d/'

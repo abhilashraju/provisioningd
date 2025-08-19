@@ -1,6 +1,7 @@
 #pragma once
 #include <sdbus_calls.hpp>
 
+#include <chrono>
 #include <string>
 static constexpr auto SPDM_SVC = "xyz.openbmc_project.spdm";
 static constexpr auto SPDM_PATH = "/xyz/openbmc_project/spdm/device1";
@@ -58,7 +59,21 @@ struct SpdmWatcher
     {
         spdmWatcherHandler = std::move(handler);
     }
-    net::awaitable<bool> watch()
+    void startTimeout(net::steady_timer& timer,
+                      std::chrono::milliseconds timeout)
+    {
+        timer.expires_after(timeout);
+        timer.async_wait([this](const boost::system::error_code& ec) {
+            if (!ec)
+            {
+                spdmWatcherHandler(false); // Timeout occurred
+                LOG_ERROR(
+                    "Timeout occurred while waiting for SPDM property change");
+            }
+        });
+    }
+    net::awaitable<bool> watch(
+        std::chrono::milliseconds timeout = std::chrono::milliseconds(5000))
     {
         if (!match)
         {
@@ -74,7 +89,10 @@ struct SpdmWatcher
                 promise_ptr->setValues(boost::system::error_code{}, result);
             };
         });
+        net::steady_timer timer(conn->get_io_context());
+        startTimeout(timer, timeout);
         auto [ec, res] = co_await h();
+        timer.cancel(); // Cancel the timer if we got a response
         if (ec)
         {
             LOG_ERROR("Error in watching SPDM property: {}", ec.message());

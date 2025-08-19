@@ -6,15 +6,14 @@ using namespace reactor;
 using Streamer = reactor::TimedStreamer<ssl::stream<tcp::socket>>;
 struct BmcWatcher
 {
-
     TcpStreamType acceptor;
     TcpServer<TcpStreamType, BmcWatcher> server;
     using WatcherCallback = std::function<void(bool)>;
     WatcherCallback watcherCallback;
-    BmcWatcher(net::io_context &ctx, ssl::context &ssl, short port)
-        : acceptor(ctx.get_executor(), port, ssl), server(ctx.get_executor(), acceptor, *this)
-    {
-    }
+    BmcWatcher(net::io_context& ctx, ssl::context& ssl, short port) :
+        acceptor(ctx.get_executor(), port, ssl),
+        server(ctx.get_executor(), acceptor, *this)
+    {}
     void onConnectionChange(WatcherCallback callback)
     {
         watcherCallback = std::move(callback);

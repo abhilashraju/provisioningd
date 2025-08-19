@@ -11,28 +11,34 @@
 
 #include <fstream>
 #include <iostream>
+static std::string cert_root = "/tmp/1222";
 using namespace reactor;
 inline std::string trusStorePath()
 {
-    return std::format("{}etc/ssl/certs/ca.pem", "/tmp/20057/");
+    return std::format("{}etc/ssl/certs/ca.pem", cert_root);
 }
 inline std::string ENTITY_CLIENT_CERT_PATH()
 {
-    return std::format("{}etc/ssl/certs/https/client_cert.pem", "/tmp/20057/");
+    return std::format("{}etc/ssl/certs/https/client_cert.pem", cert_root);
 }
 inline std::string CLIENT_PKEY_PATH()
 {
-    return std::format("{}etc/ssl/private/client_pkey.pem", "/tmp/20057/");
+    return std::format("{}etc/ssl/private/client_pkey.pem", cert_root);
 }
 inline std::string ENTITY_SERVER_CERT_PATH()
 {
-    return std::format("{}etc/ssl/certs/https/server_cert.pem", "/tmp/20057/");
+    return std::format("{}etc/ssl/certs/https/server_cert.pem", cert_root);
 }
 inline std::string SERVER_PKEY_PATH()
 {
-    return std::format("{}etc/ssl/private/server_pkey.pem", "/tmp/20057/");
+    return std::format("{}etc/ssl/private/server_pkey.pem", cert_root);
 }
-
+net::awaitable<void> waitFor(net::io_context& io_context,
+                             std::chrono::seconds duration)
+{
+    net::steady_timer timer(io_context, duration);
+    co_await timer.async_wait(net::use_awaitable);
+}
 net::awaitable<void> tryConnect(net::io_context& io_context,
                                 const std::string& ip, short port,
                                 ProvisioningController& controller)
@@ -89,6 +95,7 @@ net::awaitable<void> tryConnect(net::io_context& io_context,
             LOG_ERROR("Send error: {}", ecw.message());
             co_return;
         }
+        co_await waitFor(io_context, 1s);
     }
 }
 
@@ -140,6 +147,7 @@ int main(int argc, const char* argv[])
         auto rport = confJson.value("rport", 8090);
         auto sport = confJson.value("port", 8091);
         auto ip = confJson.value("rip", std::string{"127.0.0.1"});
+        cert_root = confJson.value("cert_root", std::string{"/tmp/1222/"});
         // Load server certificate and private key
         ssl_context.set_options(boost::asio::ssl::context::default_workarounds |
                                 boost::asio::ssl::context::no_sslv2 |
@@ -178,9 +186,13 @@ int main(int argc, const char* argv[])
         {
             LOG_INFO("Starting provisioning process");
             auto watcherPtr = std::make_shared<SpdmWatcher>(conn, "device1");
+            // net::co_spawn(io_context,
+            //               std::bind_front(startSpdm, std::ref(*conn),
+            //                               watcherPtr, std::ref(io_context),
+            //                               ip, rport, std::ref(controller)),
+            //               net::detached);
             net::co_spawn(io_context,
-                          std::bind_front(startSpdm, std::ref(*conn),
-                                          watcherPtr, std::ref(io_context), ip,
+                          std::bind_front(tryConnect, std::ref(io_context), ip,
                                           rport, std::ref(controller)),
                           net::detached);
         }

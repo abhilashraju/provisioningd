@@ -8,4 +8,4 @@ ExecStart=/usr/bin/provisioningd -c /var/provisioning/provisioning.conf
 Restart=always
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=network.target

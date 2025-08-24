@@ -1,9 +1,9 @@
 SUMMARY = "Provisioningd: Provisioning service"
 DESCRIPTION = "This service monitor the provisioning status of a BMC"
-HOMEPAGE = "https://github.com/ishasahni2000/provisioningd"
+HOMEPAGE = "https://github.com/abhilashraju/provisioningd"
 
 LICENSE = "MIT"
-LIC_FILES_CHKSUM = "file://LICENSE;md5=c87d289892671dc3843f34743e535818"
+LIC_FILES_CHKSUM = "file://LICENSE;md5=340bb8e2a52d3a51b4914913110967a7"
 DEPENDS = " \
     boost \
     gtest \
@@ -15,7 +15,7 @@ DEPENDS = " \
     sdbusplus \
 "
 
-SRC_URI = "git://github.com/ishasahni2000/provisioningds.git;branch=main;protocol=https"
+SRC_URI = "git://github.com/abhilashraju/provisioningd.git;branch=main;protocol=https"
 SRCREV = "${AUTOREV}"
 
 S = "${WORKDIR}/git"

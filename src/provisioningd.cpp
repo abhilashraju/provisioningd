@@ -4,10 +4,10 @@
 
 #include <unistd.h>
 
-#include <command_line_parser.hpp>
 #include <nlohmann/json.hpp>
-#include <tcp_client.hpp>
-#include <tcp_server.hpp>
+#include <reactor/command_line_parser.hpp>
+#include <reactor/tcp_client.hpp>
+#include <reactor/tcp_server.hpp>
 
 #include <fstream>
 #include <iostream>

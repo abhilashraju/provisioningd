@@ -1,6 +1,7 @@
-#include "bmcwatcher.hpp"
+#include "bmcresponder.hpp"
 #include "provisioning_object.hpp"
 #include "spdmwatcher.hpp"
+#include "ssl_functions.hpp"
 
 #include <unistd.h>
 
@@ -11,63 +12,22 @@
 
 #include <fstream>
 #include <iostream>
-static std::string cert_root = "/tmp/1222";
-using namespace reactor;
-inline std::string trusStorePath()
-{
-    return std::format("{}etc/ssl/certs/ca.pem", cert_root);
-}
-inline std::string ENTITY_CLIENT_CERT_PATH()
-{
-    return std::format("{}etc/ssl/certs/https/client_cert.pem", cert_root);
-}
-inline std::string CLIENT_PKEY_PATH()
-{
-    return std::format("{}etc/ssl/private/client_pkey.pem", cert_root);
-}
-inline std::string ENTITY_SERVER_CERT_PATH()
-{
-    return std::format("{}etc/ssl/certs/https/server_cert.pem", cert_root);
-}
-inline std::string SERVER_PKEY_PATH()
-{
-    return std::format("{}etc/ssl/private/server_pkey.pem", cert_root);
-}
+
 net::awaitable<void> waitFor(net::io_context& io_context,
                              std::chrono::seconds duration)
 {
     net::steady_timer timer(io_context, duration);
     co_await timer.async_wait(net::use_awaitable);
 }
-net::awaitable<void> tryConnect(net::io_context& io_context,
-                                const std::string& ip, short port,
-                                ProvisioningController& controller)
+
+net::awaitable<bool> monitorBmc(net::io_context& io_context, TcpClient& client)
 {
-    ssl::context ssl_context(ssl::context::sslv23_client);
-    ssl_context.set_options(boost::asio::ssl::context::default_workarounds |
-                            boost::asio::ssl::context::no_sslv2 |
-                            boost::asio::ssl::context::single_dh_use);
-    ssl_context.load_verify_file(trusStorePath());
-    ssl_context.set_verify_mode(boost::asio::ssl::verify_peer);
-    ssl_context.use_certificate_chain_file(ENTITY_CLIENT_CERT_PATH());
-    ssl_context.use_private_key_file(CLIENT_PKEY_PATH(),
-                                     boost::asio::ssl::context::pem);
-    TcpClient client(io_context.get_executor(), ssl_context);
-    auto ec = co_await client.connect(ip, std::to_string(port));
-    if (ec)
-    {
-        controller.setTrustedConnectionState(false);
-        LOG_ERROR("Connect error: {}", ec.message());
-        co_return;
-    }
     std::string message("Hello");
-    size_t bytes{0};
-    std::tie(ec, bytes) = co_await client.write(net::buffer(message));
+    auto [ec, bytes] = co_await client.write(net::buffer(message));
     if (ec)
     {
-        controller.setTrustedConnectionState(false);
         LOG_ERROR("Connect error: {}", ec.message());
-        co_return;
+        co_return false;
     }
     std::array<char, 1024> data{0};
     while (true)
@@ -79,50 +39,113 @@ net::awaitable<void> tryConnect(net::io_context& io_context,
             {
                 continue;
             }
-            else
-            {
-                controller.setTrustedConnectionState(false);
-                LOG_ERROR("Receive error: {}", ec.message());
-                co_return;
-            }
-            co_return;
+            LOG_ERROR("Receive error: {}", ec.message());
+            co_return false;
         }
         std::string ping("ping");
         auto [ecw, bytesw] = co_await client.write(net::buffer(ping));
         if (ecw)
         {
-            controller.setTrustedConnectionState(false);
             LOG_ERROR("Send error: {}", ecw.message());
-            co_return;
+            co_return false;
         }
         co_await waitFor(io_context, 1s);
     }
+    co_return false;
 }
 
-net::awaitable<void> startSpdm(sdbusplus::asio::connection& conn,
-                               std::shared_ptr<SpdmWatcher> watcher,
-                               net::io_context& ioc, const std::string& ip,
-                               short port, ProvisioningController& controller)
+net::awaitable<void> tryConnect(net::io_context& io_context,
+                                const std::string& ip, short port,
+                                ProvisioningController& controller)
 {
-    // This method would start the SPDM provisioning process.
-    // Implementation would depend on the specific requirements.
-    LOG_INFO("Starting SPDM provisioning");
-    auto [ec, msg] = co_await awaitable_dbus_method_call<sdbusplus::message_t>(
-        conn, SPDM_SVC, SPDM_PATH, SPDM_INTF, "attest");
+    LOG_DEBUG("Trying peer connection");
+    auto sslCtx = getClientContext();
+    if (!sslCtx)
+    {
+        LOG_ERROR("ssl context is not available");
+        co_await controller.setPeerConnected(false);
+        co_return;
+    }
+    TcpClient client(io_context.get_executor(), *sslCtx);
+    auto ec = co_await client.connect(ip, std::to_string(port));
     if (ec)
     {
-        LOG_ERROR("Failed to start spdm: {}", ec.message());
+        co_await controller.setPeerConnected(false);
+        LOG_ERROR("Connect error: {} {}", ip, ec.message());
+        co_return;
     }
+    bool bmcNotResponding = co_await monitorBmc(io_context, client);
+    co_await controller.setPeerConnected(bmcNotResponding);
+}
 
-    bool prop = co_await watcher->watch();
-    if (prop)
+std::shared_ptr<BmcResponder> makeBmcResponder(net::io_context& ctx,
+                                               ssl::context sslCtx, short port)
+{
+    auto bmcResponder =
+        std::make_shared<BmcResponder>(ctx, std::move(sslCtx), port);
+
+    bmcResponder->onConnectionChange([&](bool connected) {
+        if (connected)
+        {
+            LOG_INFO("BMC watcher connected");
+        }
+        else
+        {
+            LOG_ERROR("BMC watcher disconnected");
+        }
+    });
+    return bmcResponder;
+}
+net::awaitable<void> onSpdmStateChange(
+    net::io_context& io_context, const std::string& ip, short sport,
+    ProvisioningController& controller,
+    std::shared_ptr<BmcResponder>& bmcResponder, short rport,
+    const boost::system::error_code& ec, bool val)
+{
+    if (ec)
+    {
+        co_return;
+    }
+    if (val)
     {
         LOG_INFO("SPDM provisioning completed successfully");
-        co_await tryConnect(ioc, ip, port, controller);
+        if (bmcResponder)
+        {
+            bmcResponder.reset();
+        }
+        auto sslContext = getServerContext();
+        if (sslContext)
+        {
+            bmcResponder =
+                makeBmcResponder(io_context, std::move(*sslContext), sport);
+        }
+
+        co_await tryConnect(io_context, ip, rport, controller);
+        co_return;
     }
-    else
+}
+net::awaitable<void> startSpdm(
+    sdbusplus::asio::connection& conn, std::shared_ptr<SpdmWatcher> watcher,
+    net::io_context& ioc, const std::string& ip, short port,
+    ProvisioningController& controller,
+    std::shared_ptr<BmcResponder>& bmcResponder, short bmcport)
+{
+    try
     {
-        LOG_ERROR("SPDM provisioning failed");
+        // This method would start the SPDM provisioning process.
+        // Implementation would depend on the specific requirements.
+        LOG_INFO("Starting SPDM provisioning");
+        auto [ec, msg] =
+            co_await awaitable_dbus_method_call<sdbusplus::message_t>(
+                conn, SPDM_SVC, SPDM_PATH, SPDM_INTF, "attest");
+        if (ec)
+        {
+            LOG_ERROR("Failed to start spdm: {}", ec.message());
+        }
+    }
+    catch (std::exception& e)
+    {
+        LOG_ERROR("SPDM provisioning failed {}", e.what());
     }
 }
 
@@ -135,7 +158,7 @@ int main(int argc, const char* argv[])
         auto [conf, start] =
             getArgs(parseCommandline(argc, argv), "--conf,-c", "--start,-s");
         net::io_context io_context;
-        ssl::context ssl_context(ssl::context::sslv23_server);
+
         if (!conf)
         {
             LOG_ERROR(
@@ -148,54 +171,49 @@ int main(int argc, const char* argv[])
         auto sport = confJson.value("port", 8091);
         auto ip = confJson.value("rip", std::string{"127.0.0.1"});
         cert_root = confJson.value("cert_root", std::string{"/tmp/1222/"});
-        // Load server certificate and private key
-        ssl_context.set_options(boost::asio::ssl::context::default_workarounds |
-                                boost::asio::ssl::context::no_sslv2 |
-                                boost::asio::ssl::context::single_dh_use);
+        auto sslCtx = getServerContext();
+        std::shared_ptr<BmcResponder> bmcResponder;
+        if (sslCtx)
+        {
+            bmcResponder =
+                makeBmcResponder(io_context, std::move(*sslCtx), sport);
+        }
 
-        ssl_context.use_certificate_chain_file(ENTITY_SERVER_CERT_PATH());
-        ssl_context.use_private_key_file(SERVER_PKEY_PATH(),
-                                         boost::asio::ssl::context::pem);
-        ssl_context.load_verify_file(trusStorePath());
-        ssl_context.set_verify_mode(boost::asio::ssl::verify_peer);
-        BmcWatcher watcher(io_context, ssl_context, sport);
-
-        watcher.onConnectionChange([&](bool connected) {
-            if (connected)
-            {
-                LOG_INFO("BMC watcher connected");
-            }
-            else
-            {
-                LOG_ERROR("BMC watcher disconnected");
-            }
-        });
         auto conn = std::make_shared<sdbusplus::asio::connection>(io_context);
         ProvisioningController controller(io_context, conn);
         conn->request_name(ProvisioningController::busName);
-        controller.setProvisioningStateHandler([&]() {
+        controller.setProvisionHandler([&]() {
             LOG_INFO("Provisioning started");
             auto watcherPtr = std::make_shared<SpdmWatcher>(conn, "device1");
             net::co_spawn(io_context,
                           std::bind_front(startSpdm, std::ref(*conn),
                                           watcherPtr, std::ref(io_context), ip,
+                                          rport, std::ref(controller),
+                                          std::ref(bmcResponder), sport),
+                          net::detached);
+        });
+        controller.setChekpeerHandler([&]() {
+            LOG_INFO("Checking peer BMC connection");
+            net::co_spawn(io_context,
+                          std::bind_front(tryConnect, std::ref(io_context), ip,
                                           rport, std::ref(controller)),
                           net::detached);
         });
-        if (start)
+        if (!bmcResponder)
         {
             LOG_INFO("Starting provisioning process");
             auto watcherPtr = std::make_shared<SpdmWatcher>(conn, "device1");
-            // net::co_spawn(io_context,
-            //               std::bind_front(startSpdm, std::ref(*conn),
-            //                               watcherPtr, std::ref(io_context),
-            //                               ip, rport, std::ref(controller)),
-            //               net::detached);
             net::co_spawn(io_context,
                           std::bind_front(tryConnect, std::ref(io_context), ip,
                                           rport, std::ref(controller)),
                           net::detached);
         }
+        SpdmWatcher::watch(
+            io_context, conn, "device1",
+            std::bind_front(onSpdmStateChange, std::ref(io_context), ip, sport,
+                            std::ref(controller), std::ref(bmcResponder),
+                            rport));
+        // controller.provision();
         io_context.run();
     }
     catch (const std::exception& e)

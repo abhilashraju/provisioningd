@@ -34,18 +34,19 @@ S = "${WORKDIR}/git"
 bindir = "/usr/bin"
 systemd_system_unitdir = "/etc/systemd/system"
 etc_dbus_conf = "/etc/dbus-1/system.d"
-do_install() {
-     install -d ${D}${bindir}
-     install -m 0755 ${B}/provisioningd ${D}${bindir}/provisioningd
-     install -d ${D}${systemd_system_unitdir}
-     install -d ${D}${etc_dbus_conf}
-     
-     
-     install -m 0644 ${S}/service/xyz.openbmc_project.Provisioning.service ${D}${systemd_system_unitdir}/
-     install -m 0644 ${S}/service/xyz.openbmc_project.Provisioning.conf ${D}${etc_dbus_conf}/
-}
+#do_install() {
+#     install -d ${D}${bindir}
+#     install -m 0755 ${B}/provisioningd ${D}${bindir}/provisioningd
+#     install -d ${D}${systemd_system_unitdir}
+#     install -d ${D}${etc_dbus_conf}
+#     
+#     
+#     install -m 0644 ${S}/service/xyz.openbmc_project.Provisioning.service ${D}${systemd_system_unitdir}/
+#     install -m 0644 ${S}/service/xyz.openbmc_project.Provisioning.conf ${D}${etc_dbus_conf}/
+#}
 
 FILES:${PN} += "/usr/bin/provisioningd"
 FILES:${PN} += "/etc/systemd/system/xyz.openbmc_project.Provisioning.service"
 FILES:${PN} += "/etc/dbus-1/system.d/xyz.openbmc_project.Provisioning.conf"
+FILES:${PN} += "/var/provisioning/provisioning.conf"
 

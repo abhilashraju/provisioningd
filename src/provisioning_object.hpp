@@ -9,7 +9,9 @@ struct ProvisioningController
     std::shared_ptr<sdbusplus::asio::dbus_interface> iface;
     bool trustedConnectionState{false};
     using PROVISIONING_HANDLER = std::function<void()>;
-    PROVISIONING_HANDLER provisioningHandler;
+    PROVISIONING_HANDLER provisionHandler;
+    using CHECK_PEER_HANDLER = std::function<void()>;
+    CHECK_PEER_HANDLER checkPeerHandler;
     static constexpr auto busName = "xyz.openbmc_project.Provisioning";
     static constexpr auto objPath = "/xyz/openbmc_project/Provisioning";
     static constexpr auto interface = "xyz.openbmc_project.Provisioning.Status";
@@ -21,13 +23,19 @@ struct ProvisioningController
         iface = dbusServer.add_interface(objPath, interface);
         // test generic properties
 
-        iface->register_method("ClearProvisioningData", [this]() {
-            clearProvisioningData();
+        iface->register_method("StartProvisioning", [this]() { provision(); });
+        iface->register_method("CheckPeerBMCConnection", [this]() {
+            checkPeer();
         });
-        iface->register_method("provision", [this]() { provision(); });
 
         iface->register_property(
-            "ProvisioningState", false,
+            "Provisioned", false,
+            std::bind_front(&ProvisioningController::setProvisioningState,
+                            this),
+            std::bind_front(&ProvisioningController::getProvisioningState,
+                            this));
+        iface->register_property(
+            "PeerConnected", false,
             std::bind_front(&ProvisioningController::setProvisioningState,
                             this),
             std::bind_front(&ProvisioningController::getProvisioningState,
@@ -35,17 +43,25 @@ struct ProvisioningController
 
         iface->initialize();
     }
-    void setProvisioningStateHandler(PROVISIONING_HANDLER handler)
+    void setProvisionHandler(PROVISIONING_HANDLER handler)
     {
-        provisioningHandler = std::move(handler);
+        provisionHandler = std::move(handler);
+    }
+    void setChekpeerHandler(CHECK_PEER_HANDLER handler)
+    {
+        checkPeerHandler = std::move(handler);
     }
     void provision()
     {
-        clearProvisioningData();
-        provisioningHandler();
+        clearProvisionData();
+        provisionHandler();
+    }
+    void checkPeer()
+    {
+        checkPeerHandler();
     }
 
-    void clearProvisioningData()
+    void clearProvisionData()
     {
         // clearCertificates();
         // This method would clear the provisioning data.
@@ -66,14 +82,29 @@ struct ProvisioningController
     }
     bool getProvisioningState(bool currentstate)
     {
-        // This method would get the current provisioning state.
-        // Implementation would depend on the specific requirements.
-        LOG_INFO("Getting provisioning state: {}", currentstate);
         return currentstate; // Return the current state
     }
-    void setTrustedConnectionState(bool state)
+    bool setPeerConnectionState(bool newstate, bool& currentstate)
     {
-        trustedConnectionState = state;
-        LOG_INFO("Setting peer state to {}", state);
+        if (trustedConnectionState == newstate)
+        {
+            LOG_INFO("Peer connection state is already set to {}",
+                     trustedConnectionState);
+            return false; // No change needed
+        }
+        trustedConnectionState = newstate;
+
+        return true; // Return true if successful
+    }
+    bool getPeerConnectionState(bool currentstate)
+    {
+        return trustedConnectionState; // Return the current state
+    }
+    net::awaitable<void> setPeerConnected(bool connected)
+    {
+        co_await setProperty(*conn, busName, objPath, interface,
+                             "PeerConnected", connected);
+        co_await setProperty(*conn, busName, objPath, interface, "Provisioned",
+                             connected);
     }
 };

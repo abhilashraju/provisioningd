@@ -1,4 +1,5 @@
 #pragma once
+
 #include <reactor/sdbus_calls.hpp>
 
 #include <chrono>
@@ -7,6 +8,12 @@ static constexpr auto SPDM_SVC = "xyz.openbmc_project.spdm";
 static constexpr auto SPDM_PATH = "/xyz/openbmc_project/spdm/device1";
 static constexpr auto SPDM_INTF = "xyz.openbmc_project.SpdmDevice";
 static constexpr auto SPDM_PROP = "Status";
+template <typename Handler>
+concept WatchHandler =
+    requires(Handler handler, const boost::system::error_code& ec,
+             bool result) {
+        { handler(ec, result) } -> std::same_as<boost::asio::awaitable<void>>;
+    };
 struct SpdmWatcher
 {
     std::shared_ptr<sdbusplus::asio::connection> conn;
@@ -72,23 +79,45 @@ struct SpdmWatcher
             }
         });
     }
-    net::awaitable<bool> watch(
+    auto makeWatchHandler()
+    {
+        return make_awaitable_handler<bool>([this](auto promise) {
+            auto promise_ptr =
+                std::make_shared<decltype(promise)>(std::move(promise));
+            spdmWatcherHandler = [promise_ptr](bool status) {
+                promise_ptr->setValues(boost::system::error_code{}, status);
+            };
+        });
+    }
+    net::awaitable<void> watch(auto callback)
+    {
+        if (!match)
+        {
+            LOG_ERROR("Match object is not initialized");
+            co_await callback(std::nullopt);
+            co_return;
+        }
+        auto h = makeWatchHandler();
+        boost::system::error_code ec{};
+        while (!ec)
+        {
+            bool res{false};
+            std::tie(ec, res) = co_await h();
+            co_await callback(std::optional(res));
+        }
+        LOG_ERROR("Error in watching SPDM property: {}", ec.message());
+        co_await callback(std::nullopt);
+        co_return;
+    }
+    net::awaitable<std::optional<bool>> watchOnce(
         std::chrono::milliseconds timeout = std::chrono::milliseconds(5000))
     {
         if (!match)
         {
             LOG_ERROR("Match object is not initialized");
-            co_return false;
+            co_return std::nullopt;
         }
-        bool result = false;
-        auto h = make_awaitable_handler<bool>([this, &result](auto promise) {
-            auto promise_ptr =
-                std::make_shared<decltype(promise)>(std::move(promise));
-            spdmWatcherHandler = [promise_ptr, &result](bool status) {
-                result = status;
-                promise_ptr->setValues(boost::system::error_code{}, result);
-            };
-        });
+        auto h = makeWatchHandler();
         net::steady_timer timer(conn->get_io_context());
         startTimeout(timer, timeout);
         auto [ec, res] = co_await h();
@@ -96,73 +125,34 @@ struct SpdmWatcher
         if (ec)
         {
             LOG_ERROR("Error in watching SPDM property: {}", ec.message());
-            co_return false;
+            co_return std::nullopt;
         }
-        co_return res;
+        co_return std::optional(res);
+    }
+
+    static void watch(net::io_context& ctx,
+                      std::shared_ptr<sdbusplus::asio::connection> conn,
+                      const std::string& device, WatchHandler auto callback)
+    {
+        net::co_spawn(
+            ctx,
+            [spdmWatcher = std::make_shared<SpdmWatcher>(conn, device),
+             callback = std::move(callback)]() -> net::awaitable<void> {
+                co_await spdmWatcher->watch(
+                    [callback = std::move(callback)](
+                        std::optional<bool> val) -> net::awaitable<void> {
+                        if (val)
+                        {
+                            co_await callback(boost::system::error_code{},
+                                              *val);
+                            co_return;
+                        }
+                        co_await callback(
+                            boost::system::errc::make_error_code(
+                                boost::system::errc::operation_canceled),
+                            false);
+                    });
+            },
+            net::detached);
     }
 };
-
-using PropertyWatchType = bool;
-inline AwaitableResult<PropertyWatchType,
-                       std::shared_ptr<sdbusplus::bus::match::match>>
-    propertyWatch(sdbusplus::asio::connection& conn, const std::string& path,
-                  const std::string& interface, const std::string& property)
-{
-    std::shared_ptr<sdbusplus::bus::match::match> match;
-    std::string matchRule =
-        sdbusplus::bus::match::rules::propertiesChanged(path, interface);
-    auto h = make_awaitable_handler<PropertyWatchType>([matchRule, property,
-                                                        &match,
-                                                        &conn](auto promise) {
-        auto promise_ptr =
-            std::make_shared<decltype(promise)>(std::move(promise));
-        auto propcallback = [property,
-                             promise_ptr](sdbusplus::message::message& msg) {
-            std::string interfaceName;
-            std::map<std::string, std::variant<PropertyWatchType>>
-                changedProperties;
-            std::vector<std::string> invalidatedProperties;
-
-            msg.read(interfaceName, changedProperties, invalidatedProperties);
-
-            LOG_INFO("Properties changed on interface: {}", interfaceName);
-
-            changedProperties | std::ranges::views::filter([&](const auto& p) {
-                return p.first == property;
-            });
-            if (changedProperties.empty())
-            {
-                LOG_ERROR("Property {} not found in changed properties",
-                          property);
-                promise_ptr->setValues(
-                    boost::system::error_code{
-                        boost::system::errc::make_error_code(
-                            boost::system::errc::no_such_file_or_directory)},
-                    PropertyWatchType{});
-                return;
-            }
-            auto it = changedProperties.begin();
-            if (!std::holds_alternative<PropertyWatchType>(it->second))
-            {
-                LOG_ERROR("Property {} is not of type string", property);
-                promise_ptr->setValues(
-                    boost::system::error_code{
-                        boost::system::errc::make_error_code(
-                            boost::system::errc::invalid_argument)},
-                    PropertyWatchType{});
-                return;
-            }
-            auto result = std::get<PropertyWatchType>(it->second);
-            LOG_DEBUG("Property {} changed: {}", property, result);
-
-            promise_ptr->setValues(boost::system::error_code{},
-                                   std::move(result));
-        };
-        match = std::make_shared<sdbusplus::bus::match::match>(
-            conn, matchRule, std::move(propcallback));
-    });
-    auto [ec, prop] = co_await h();
-    co_return std::make_tuple(
-        ec, prop,
-        std::move(match)); // Return the property value and match object
-}

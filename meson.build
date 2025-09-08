@@ -5,9 +5,11 @@ openssl_dep = dependency('openssl', required: true)
 sdeventplus_dep = dependency('sdeventplus')
 sdbusplus_dep =dependency('sdbusplus')
 executable('provisioningd',
-  'src/provisioningd.cpp',
+  ['src/provisioningd.cpp',
+  'gen/xyz/openbmc_project/Provisioning/Provisioning/server.cpp'
+  ],
   install: true,
-  include_directories:['src'],
+  include_directories:['src','gen'],
   cpp_args: ['-DBOOST_ASIO_DISABLE_THREADS'],
   dependencies:[reactor_dep,boost_dep,openssl_dep,sdeventplus_dep,sdbusplus_dep],
   install_dir: '/usr/bin'

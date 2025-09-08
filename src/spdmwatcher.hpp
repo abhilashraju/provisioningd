@@ -17,19 +17,22 @@ concept WatchHandler =
 struct SpdmWatcher
 {
     std::shared_ptr<sdbusplus::asio::connection> conn;
-    std::optional<sdbusplus::bus::match::match> match;
+    std::optional<sdbusplus::bus::match::match> sigMatch;
+    std::optional<sdbusplus::bus::match::match> propMatch;
     std::string id;
     using SPDM_WATCHER_HANDLER = std::function<void(bool)>;
-    SPDM_WATCHER_HANDLER spdmWatcherHandler;
+    SPDM_WATCHER_HANDLER spdmPropWatcherHandler;
+    SPDM_WATCHER_HANDLER spdmSigWatcherHandler;
 
     SpdmWatcher(std::shared_ptr<sdbusplus::asio::connection> conn,
                 const std::string& id) : conn(conn), id(id)
+    {}
+    void hanleSignalChange(sdbusplus::message_t& msg)
     {
-        std::string matchRule = sdbusplus::bus::match::rules::propertiesChanged(
-            SPDM_PATH, SPDM_INTF);
-        match.emplace(
-            *conn, matchRule,
-            std::bind_front(&SpdmWatcher::handlePropertyChange, this));
+        bool value;
+        msg.read(value);
+        LOG_DEBUG("Recieved Signal value {}", value);
+        spdmSigWatcherHandler(value);
     }
     void handlePropertyChange(sdbusplus::message_t& msg)
     {
@@ -47,79 +50,131 @@ struct SpdmWatcher
         if (changedProperties.empty())
         {
             LOG_ERROR("Property {} not found in changed properties", SPDM_PROP);
-            spdmWatcherHandler(false);
+            spdmPropWatcherHandler(false);
             return;
         }
         auto it = changedProperties.begin();
         if (!std::holds_alternative<bool>(it->second))
         {
             LOG_ERROR("Property {} is not of type string", SPDM_PROP);
-            spdmWatcherHandler(false);
+            spdmPropWatcherHandler(false);
             return;
         }
         auto result = std::get<bool>(it->second);
         LOG_DEBUG("Property {} changed: {}", SPDM_PROP, result);
 
-        spdmWatcherHandler(result);
+        spdmPropWatcherHandler(result);
     }
-    void setSpdmWatcherHandler(SPDM_WATCHER_HANDLER handler)
+    void setSpdmPropWatcherHandler(SPDM_WATCHER_HANDLER handler)
     {
-        spdmWatcherHandler = std::move(handler);
+        spdmPropWatcherHandler = std::move(handler);
     }
-    void startTimeout(net::steady_timer& timer,
-                      std::chrono::milliseconds timeout)
+    void setSpdmSigWatcherHandler(SPDM_WATCHER_HANDLER handler)
+    {
+        spdmSigWatcherHandler = std::move(handler);
+    }
+    void startTimeout(net::steady_timer& timer, std::chrono::seconds timeout,
+                      bool prop)
     {
         timer.expires_after(timeout);
-        timer.async_wait([this](const boost::system::error_code& ec) {
+        timer.async_wait([this, prop](const boost::system::error_code& ec) {
             if (!ec)
             {
-                spdmWatcherHandler(false); // Timeout occurred
+                if (prop)
+                {
+                    spdmPropWatcherHandler(false);
+                }
+                else
+                {
+                    spdmSigWatcherHandler(false);
+                }
                 LOG_ERROR(
                     "Timeout occurred while waiting for SPDM property change");
             }
         });
     }
-    auto makeWatchHandler()
+    auto makeWatchHandler(bool prop)
     {
-        return make_awaitable_handler<bool>([this](auto promise) {
+        return make_awaitable_handler<bool>([this, prop](auto promise) {
             auto promise_ptr =
                 std::make_shared<decltype(promise)>(std::move(promise));
-            spdmWatcherHandler = [promise_ptr](bool status) {
-                promise_ptr->setValues(boost::system::error_code{}, status);
-            };
+            if (prop)
+            {
+                spdmPropWatcherHandler = [promise_ptr](bool status) {
+                    promise_ptr->setValues(boost::system::error_code{}, status);
+                };
+            }
+            else
+            {
+                spdmSigWatcherHandler = [promise_ptr](bool status) {
+                    promise_ptr->setValues(boost::system::error_code{}, status);
+                };
+            }
         });
     }
+    template <bool prop>
+    bool ensureMatchObject()
+    {
+        if constexpr (prop)
+        {
+            if (!propMatch)
+            {
+                std::string propMatchRule =
+                    sdbusplus::bus::match::rules::propertiesChanged(SPDM_PATH,
+                                                                    SPDM_INTF);
+                propMatch.emplace(
+                    *conn, propMatchRule,
+                    std::bind_front(&SpdmWatcher::handlePropertyChange, this));
+            }
+        }
+        else
+        {
+            if (!sigMatch)
+            {
+                std::string sigmatchRule =
+                    std::format("type='signal',interface='{}',member='{}'",
+                                SPDM_INTF, "Attested");
+
+                sigMatch.emplace(
+                    *conn, sigmatchRule,
+                    std::bind_front(&SpdmWatcher::hanleSignalChange, this));
+            }
+        }
+        return true;
+    }
+    template <bool prop>
     net::awaitable<void> watch(auto callback)
     {
-        if (!match)
+        if (!ensureMatchObject<prop>())
         {
             LOG_ERROR("Match object is not initialized");
             co_await callback(std::nullopt);
-            co_return;
         }
-        auto h = makeWatchHandler();
         boost::system::error_code ec{};
         while (!ec)
         {
+            auto h = makeWatchHandler(prop);
             bool res{false};
             std::tie(ec, res) = co_await h();
+            LOG_DEBUG("after  watch");
             co_await callback(std::optional(res));
         }
         LOG_ERROR("Error in watching SPDM property: {}", ec.message());
         co_await callback(std::nullopt);
         co_return;
     }
+    template <bool prop>
     net::awaitable<std::optional<bool>> watchOnce(
-        std::chrono::milliseconds timeout = std::chrono::milliseconds(5000))
+        std::chrono::seconds timeout = 1s)
     {
-        if (!match)
+        if (!ensureMatchObject<prop>())
         {
             LOG_ERROR("Match object is not initialized");
             co_return std::nullopt;
         }
-        auto h = makeWatchHandler();
+        auto h = makeWatchHandler(prop);
         net::steady_timer timer(conn->get_io_context());
-        startTimeout(timer, timeout);
+        startTimeout(timer, timeout, prop);
         auto [ec, res] = co_await h();
         timer.cancel(); // Cancel the timer if we got a response
         if (ec)
@@ -129,7 +184,7 @@ struct SpdmWatcher
         }
         co_return std::optional(res);
     }
-
+    template <bool prop>
     static void watch(net::io_context& ctx,
                       std::shared_ptr<sdbusplus::asio::connection> conn,
                       const std::string& device, WatchHandler auto callback)
@@ -138,15 +193,18 @@ struct SpdmWatcher
             ctx,
             [spdmWatcher = std::make_shared<SpdmWatcher>(conn, device),
              callback = std::move(callback)]() -> net::awaitable<void> {
-                co_await spdmWatcher->watch(
+                co_await spdmWatcher->watch<prop>(
                     [callback = std::move(callback)](
                         std::optional<bool> val) -> net::awaitable<void> {
                         if (val)
                         {
+                            LOG_DEBUG("Calling prop change with value {}",
+                                      *val);
                             co_await callback(boost::system::error_code{},
                                               *val);
                             co_return;
                         }
+                        LOG_DEBUG("Calling prop change with value {}", "error");
                         co_await callback(
                             boost::system::errc::make_error_code(
                                 boost::system::errc::operation_canceled),

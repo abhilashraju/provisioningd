@@ -74,6 +74,7 @@ net::awaitable<void> tryConnect(net::io_context& io_context,
         LOG_ERROR("Connect error: {} {}", ip, ec.message());
         co_return;
     }
+    co_await controller.setPeerConnected(true);
     bool bmcNotResponding = co_await monitorBmc(io_context, client);
     co_await controller.setPeerConnected(bmcNotResponding);
 }
@@ -106,23 +107,23 @@ net::awaitable<void> onSpdmStateChange(
     {
         co_return;
     }
+    controller.setProvisioned(val);
     if (val)
     {
         LOG_INFO("SPDM provisioning completed successfully");
-        if (bmcResponder)
-        {
-            bmcResponder.reset();
-        }
-        auto sslContext = getServerContext();
-        if (sslContext)
-        {
-            bmcResponder =
-                makeBmcResponder(io_context, std::move(*sslContext), sport);
-        }
-
-        co_await tryConnect(io_context, ip, rport, controller);
+        // if (bmcResponder)
+        // {
+        //     bmcResponder.reset();
+        // }
+        // auto sslContext = getServerContext();
+        // if (sslContext)
+        // {
+        //     bmcResponder =
+        //         makeBmcResponder(io_context, std::move(*sslContext), sport);
+        // }
         co_return;
     }
+    LOG_INFO("SPDM provisioning completed with failed status");
 }
 net::awaitable<void> startSpdm(
     sdbusplus::asio::connection& conn, std::shared_ptr<SpdmWatcher> watcher,
@@ -141,6 +142,14 @@ net::awaitable<void> startSpdm(
         if (ec)
         {
             LOG_ERROR("Failed to start spdm: {}", ec.message());
+        }
+        auto val = co_await watcher->watchOnce<false>(30s);
+        if (val && *val)
+        {
+            net::co_spawn(ioc,
+                          std::bind_front(tryConnect, std::ref(ioc), ip,
+                                          bmcport, std::ref(controller)),
+                          net::detached);
         }
     }
     catch (std::exception& e)
@@ -208,7 +217,7 @@ int main(int argc, const char* argv[])
                                           rport, std::ref(controller)),
                           net::detached);
         }
-        SpdmWatcher::watch(
+        SpdmWatcher::watch<true>(
             io_context, conn, "device1",
             std::bind_front(onSpdmStateChange, std::ref(io_context), ip, sport,
                             std::ref(controller), std::ref(bmcResponder),

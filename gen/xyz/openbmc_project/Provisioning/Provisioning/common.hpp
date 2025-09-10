@@ -21,6 +21,7 @@ struct Provisioning
     struct properties_t
     {
         bool provisioned = false;
+        bool peer_connected = false;
     };
 
     using PropertiesVariant = sdbusplus::utility::dedup_variant_t<

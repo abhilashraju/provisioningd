@@ -37,14 +37,13 @@ struct ProvisioningController : Ifaces
         ioContext(ctx), conn(conn)
 
     {}
-    void startProvisioning() override
+    void provisionPeer() override
     {
         provision();
     }
-    bool checkPeerBMCConnection() override
+    void initiatePeerConnectionTest() override
     {
         checkPeerHandler();
-        return true;
     }
 
     void setProvisionHandler(PROVISIONING_HANDLER handler)
@@ -72,32 +71,20 @@ struct ProvisioningController : Ifaces
         // Implementation would depend on the specific requirements.
         LOG_INFO("Clearing provisioning data");
     }
-
-    bool setPeerConnectionState(bool newstate, bool& currentstate)
+    bool peerConnected() const override
     {
-        if (trustedConnectionState == newstate)
-        {
-            LOG_INFO("Peer connection state is already set to {}",
-                     trustedConnectionState);
-            return false; // No change needed
-        }
-        trustedConnectionState = newstate;
-
-        return true; // Return true if successful
-    }
-    bool getPeerConnectionState(bool currentstate)
-    {
-        return trustedConnectionState; // Return the current state
+        LOG_DEBUG("PeerConnected state {}", trustedConnectionState);
+        return trustedConnectionState;
     }
     bool provisioned() const override
     {
         LOG_DEBUG("Provisioned state {}", provState);
         return provState;
     }
-    net::awaitable<void> setPeerConnected(bool connected)
+    void setPeerConnected(bool value)
     {
-        co_await setProperty(*conn, busName, objPath, interface,
-                             "PeerConnected", connected);
+        LOG_DEBUG("Setting PeerConnected state {}", value);
+        trustedConnectionState = value;
     }
     void setProvisioned(bool value)
     {

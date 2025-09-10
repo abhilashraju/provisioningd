@@ -52,22 +52,20 @@ class Provisioning :
     // indirectly through sdbusplus::async::client_t.
     Provisioning() = delete;
 
-    /** @brief StartProvisioning
-     *  Starts the provisioning process and updates the ProvisioningState accordingly.
+    /** @brief ProvisionPeer
+     *  Starts the provisioning process on the peerBmc .
      */
-    auto start_provisioning()
+    auto provision_peer()
     {
-        return proxy.template call<>(context(), "StartProvisioning");
+        return proxy.template call<>(context(), "ProvisionPeer");
     }
 
-    /** @brief CheckPeerBMCConnection
-     *  Performs a check to determine if the peer BMC is reachable and and if already provisioned.
-     *
-     *  @return unnamed[bool] - True if the peer BMC is reachable and provisioned. false if peer BMC is not reachable or not-provisioned.
+    /** @brief InitiatePeerConnectionTest
+     *  starts an mTLS connection attempt to the peer BMC. This method only initiates the handshake and returns immediately; the result (success/failure) must be reflected by the daemon by updating the PeerConnected property.
      */
-    auto check_peer_bmc_connection()
+    auto initiate_peer_connection_test()
     {
-        return proxy.template call<bool>(context(), "CheckPeerBMCConnection");
+        return proxy.template call<>(context(), "InitiatePeerConnectionTest");
     }
 
     /** Get value of Provisioned
@@ -76,6 +74,15 @@ class Provisioning :
     auto provisioned()
     {
         return proxy.template get_property<bool>(context(), "Provisioned");
+    }
+
+
+    /** Get value of PeerConnected
+     *  True if a peer BMC is present and detected on the network. False if no peer BMC is present or not connected.
+     */
+    auto peer_connected()
+    {
+        return proxy.template get_property<bool>(context(), "PeerConnected");
     }
 
 

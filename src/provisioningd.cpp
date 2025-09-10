@@ -96,19 +96,19 @@ net::awaitable<void> tryConnect(net::io_context& io_context,
     if (!sslCtx)
     {
         LOG_ERROR("ssl context is not available");
-        co_await controller.setPeerConnected(false);
+        controller.setPeerConnected(false);
         co_return;
     }
     TcpClient client(io_context.get_executor(), *sslCtx);
     auto ec = co_await connect(client, ip, port);
     if (ec)
     {
-        co_await controller.setPeerConnected(false);
+        controller.setPeerConnected(false);
         co_return;
     }
-    co_await controller.setPeerConnected(true);
+    controller.setPeerConnected(true);
     bool bmcNotResponding = co_await monitorBmc(io_context, client);
-    co_await controller.setPeerConnected(bmcNotResponding);
+    controller.setPeerConnected(bmcNotResponding);
 }
 
 std::shared_ptr<BmcResponder> makeBmcResponder(
@@ -172,11 +172,14 @@ net::awaitable<void> startSpdm(
         auto val = co_await watcher->watchOnce<false>(30s);
         if (val && *val)
         {
+            controller.peerProvisioned(true);
             net::co_spawn(ioc,
                           std::bind_front(tryConnect, std::ref(ioc), ip,
                                           bmcport, std::ref(controller)),
                           net::detached);
+            co_return;
         }
+        controller.peerProvisioned(false);
     }
     catch (std::exception& e)
     {

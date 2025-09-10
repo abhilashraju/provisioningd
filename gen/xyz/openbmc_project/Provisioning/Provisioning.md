@@ -4,22 +4,18 @@ Interface to represent the provisioning status of the BMC. Provides a property t
 
 
 ## Methods
-### StartProvisioning
+### ProvisionPeer
 
-Starts the provisioning process and updates the ProvisioningState accordingly.
-
-
+Starts the provisioning process on the peerBmc .
 
 
-### CheckPeerBMCConnection
-
-Performs a check to determine if the peer BMC is reachable and and if already provisioned.
 
 
-#### Parameters and Returns
-| direction | name | type | description |
-|:---------:|------|------|-------------|
-| out | **unnamed** | boolean | True if the peer BMC is reachable and provisioned. false if peer BMC is not reachable or not-provisioned. |
+### InitiatePeerConnectionTest
+
+starts an mTLS connection attempt to the peer BMC. This method only initiates the handshake and returns immediately; the result (success/failure) must be reflected by the daemon by updating the PeerConnected property.
+
+
 
 
 
@@ -27,9 +23,15 @@ Performs a check to determine if the peer BMC is reachable and and if already pr
 | name | type | description |
 |------|------|-------------|
 | **Provisioned** | boolean | True means the BMC is in a provisioned state. |
+| **PeerConnected** | boolean | True if a peer BMC is present and detected on the network. False if no peer BMC is present or not connected. |
 
 ## Signals
-No signals.
+### PeerProvisioned
+
+Emitted when the ProvisionPeer method completes. The signal carries a boolean indicating whether provisioning on the peer succeeded or failed.
+
+
+
 
 ## Enumerations
 No enumerations.

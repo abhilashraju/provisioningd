@@ -53,7 +53,40 @@ net::awaitable<bool> monitorBmc(net::io_context& io_context, TcpClient& client)
     }
     co_return false;
 }
+net::awaitable<boost::system::error_code> connect(
+    TcpClient& client, const std::string& ip, short port)
+{
+    int retryCount = 3;
+    while (retryCount--)
+    {
+        auto ec = co_await client.connect(ip, std::to_string(port));
 
+        if (ec)
+        {
+            if (ec.category() ==
+                boost::asio::error::ssl_category) // check SSL error
+            {
+                LOG_ERROR("SSL connect error: {} {}", ip, ec.message());
+                co_return ec;
+            }
+
+            if (retryCount <= 0)
+            {
+                LOG_ERROR("Connect error: {} {}", ip, ec.message());
+                co_return ec;
+            }
+
+            // retry after delay
+            boost::asio::steady_timer timer(
+                co_await boost::asio::this_coro::executor);
+            timer.expires_after(std::chrono::seconds(5));
+            co_await timer.async_wait(net::use_awaitable);
+            continue;
+        }
+        break;
+    }
+    co_return boost::system::error_code{};
+}
 net::awaitable<void> tryConnect(net::io_context& io_context,
                                 const std::string& ip, short port,
                                 ProvisioningController& controller)
@@ -67,11 +100,10 @@ net::awaitable<void> tryConnect(net::io_context& io_context,
         co_return;
     }
     TcpClient client(io_context.get_executor(), *sslCtx);
-    auto ec = co_await client.connect(ip, std::to_string(port));
+    auto ec = co_await connect(client, ip, port);
     if (ec)
     {
         co_await controller.setPeerConnected(false);
-        LOG_ERROR("Connect error: {} {}", ip, ec.message());
         co_return;
     }
     co_await controller.setPeerConnected(true);
@@ -79,21 +111,15 @@ net::awaitable<void> tryConnect(net::io_context& io_context,
     co_await controller.setPeerConnected(bmcNotResponding);
 }
 
-std::shared_ptr<BmcResponder> makeBmcResponder(net::io_context& ctx,
-                                               ssl::context sslCtx, short port)
+std::shared_ptr<BmcResponder> makeBmcResponder(
+    net::io_context& ctx, ssl::context sslCtx, short port,
+    ProvisioningController& controller)
 {
     auto bmcResponder =
         std::make_shared<BmcResponder>(ctx, std::move(sslCtx), port);
 
-    bmcResponder->onConnectionChange([&](bool connected) {
-        if (connected)
-        {
-            LOG_INFO("BMC watcher connected");
-        }
-        else
-        {
-            LOG_ERROR("BMC watcher disconnected");
-        }
+    bmcResponder->onConnectionChange([&controller](bool connected) {
+        controller.setPeerConnected(connected);
     });
     return bmcResponder;
 }
@@ -111,16 +137,16 @@ net::awaitable<void> onSpdmStateChange(
     if (val)
     {
         LOG_INFO("SPDM provisioning completed successfully");
-        // if (bmcResponder)
-        // {
-        //     bmcResponder.reset();
-        // }
-        // auto sslContext = getServerContext();
-        // if (sslContext)
-        // {
-        //     bmcResponder =
-        //         makeBmcResponder(io_context, std::move(*sslContext), sport);
-        // }
+        if (bmcResponder)
+        {
+            bmcResponder.reset();
+        }
+        auto sslContext = getServerContext();
+        if (sslContext)
+        {
+            bmcResponder = makeBmcResponder(io_context, std::move(*sslContext),
+                                            sport, controller);
+        }
         co_return;
     }
     LOG_INFO("SPDM provisioning completed with failed status");
@@ -180,17 +206,17 @@ int main(int argc, const char* argv[])
         auto sport = confJson.value("port", 8091);
         auto ip = confJson.value("rip", std::string{"127.0.0.1"});
         cert_root = confJson.value("cert_root", std::string{"/tmp/1222/"});
-        auto sslCtx = getServerContext();
-        std::shared_ptr<BmcResponder> bmcResponder;
-        if (sslCtx)
-        {
-            bmcResponder =
-                makeBmcResponder(io_context, std::move(*sslCtx), sport);
-        }
 
         auto conn = std::make_shared<sdbusplus::asio::connection>(io_context);
         ProvisioningController controller(io_context, conn);
         conn->request_name(ProvisioningController::busName);
+        std::shared_ptr<BmcResponder> bmcResponder;
+        auto sslCtx = getServerContext();
+        if (sslCtx)
+        {
+            bmcResponder = makeBmcResponder(io_context, std::move(*sslCtx),
+                                            sport, controller);
+        }
         controller.setProvisionHandler([&]() {
             LOG_INFO("Provisioning started");
             auto watcherPtr = std::make_shared<SpdmWatcher>(conn, "device1");
@@ -208,15 +234,7 @@ int main(int argc, const char* argv[])
                                           rport, std::ref(controller)),
                           net::detached);
         });
-        if (!bmcResponder)
-        {
-            LOG_INFO("Starting provisioning process");
-            auto watcherPtr = std::make_shared<SpdmWatcher>(conn, "device1");
-            net::co_spawn(io_context,
-                          std::bind_front(tryConnect, std::ref(io_context), ip,
-                                          rport, std::ref(controller)),
-                          net::detached);
-        }
+
         SpdmWatcher::watch<true>(
             io_context, conn, "device1",
             std::bind_front(onSpdmStateChange, std::ref(io_context), ip, sport,

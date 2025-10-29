@@ -10,15 +10,16 @@ namespace NSNAME
 template <typename Handler, typename PropType>
 concept WatchHandler =
     requires(Handler handler, const boost::system::error_code& ec,
-             PropType result) {
+             std::optional<PropType> result) {
         { handler(ec, result) } -> std::same_as<boost::asio::awaitable<void>>;
     };
 
 template <typename Derived, typename PropType>
 struct DbusWatcher
 {
-    using PROPERTY_WATCHER_HANDLER = std::function<void(PropType)>;
-    PROPERTY_WATCHER_HANDLER watchHandler;
+    using PROPERTY_HANDLER =
+        std::function<void(boost::system::error_code, PropType)>;
+    PROPERTY_HANDLER propHandler;
     std::shared_ptr<sdbusplus::asio::connection> conn;
     std::optional<sdbusplus ::bus::match::match> match;
 
@@ -53,22 +54,33 @@ struct DbusWatcher
     net::awaitable<void> watch(auto callback)
     {
         boost::system::error_code ec{};
-        while (!ec)
+        auto h = makeWatchHandler();
+        while (true)
         {
-            auto h = derived().makeWatchHandler();
+            LOG_DEBUG("Waiting for Dbus property change...");
             PropType res{};
             std::tie(ec, res) = co_await h();
-            LOG_DEBUG("after  watch");
-            co_await callback(std::optional(res));
+            if (!ec)
+            {
+                LOG_DEBUG("Dbus property changed, notifying callback");
+                co_await callback(ec, std::optional(std::move(res)));
+                continue;
+            }
+            if (ec != boost::asio::error::no_such_device)
+            {
+                LOG_DEBUG(
+                    "Unsupported type or some other error occurred: {} stopping watch",
+                    ec.message());
+                co_await callback(ec, std::nullopt);
+                break;
+            }
         }
-        LOG_ERROR("Error in watching Dbus: {}", ec.message());
-        co_await callback(std::nullopt);
         co_return;
     }
     net::awaitable<std::optional<PropType>> watchOnce(
         std::chrono::seconds timeout = 1s)
     {
-        auto h = derived().makeWatchHandler();
+        auto h = makeWatchHandler();
         net::steady_timer timer(conn->get_io_context());
         startTimeout(timer, timeout);
         auto [ec, res] = co_await h();
@@ -91,29 +103,19 @@ struct DbusWatcher
             [&ctx, watcher,
              callback = std::move(callback)]() -> net::awaitable<void> {
                 co_await watcher->watch([&ctx, callback = std::move(callback)](
+                                            const boost::system::error_code& ec,
                                             std::optional<PropType> val)
                                             -> net::awaitable<void> {
-                    if (val)
-                    {
-                        net::co_spawn(
-                            ctx,
-                            [callback, val]() -> net::awaitable<void> {
-                                co_await callback(boost::system::error_code{},
-                                                  *val);
-                            },
-                            net::detached);
-                        co_return;
-                    }
-                    LOG_DEBUG("Calling prop change with value {}", "error");
                     net::co_spawn(
                         ctx,
-                        [callback, val]() -> net::awaitable<void> {
-                            co_await callback(
-                                boost::system::errc::make_error_code(
-                                    boost::system::errc::operation_canceled),
-                                PropType{});
+                        [ec, callback,
+                         val = std::move(val)]() -> net::awaitable<void> {
+                            LOG_DEBUG(
+                                "Invoking user async callback for Dbus property change");
+                            co_await callback(ec, std::move(val));
                         },
                         net::detached);
+                    co_return;
                 });
             },
             net::detached);
@@ -124,21 +126,22 @@ struct DbusWatcher
             auto promise_ptr =
                 std::make_shared<decltype(promise)>(std::move(promise));
 
-            watchHandler = [promise_ptr](PropType status) {
-                promise_ptr->setValues(boost::system::error_code{}, status);
+            propHandler = [promise_ptr](const boost::system::error_code& ec,
+                                        PropType value) {
+                promise_ptr->setValues(ec, std::move(value));
             };
         });
     }
-    void notifyChange(PropType value)
+    void notifyChange(const boost::system::error_code& ec, PropType value)
     {
-        if (watchHandler)
+        if (propHandler)
         {
-            watchHandler(value);
+            propHandler(ec, std::move(value));
         }
     }
     void cancelWatch()
     {
-        notifyChange(PropType{});
+        propHandler(boost::asio::error::operation_aborted, PropType{});
     }
 };
 template <typename TYPE>
@@ -170,36 +173,43 @@ struct DbusPropertyWatcher : public DbusWatcher<DbusPropertyWatcher<TYPE>, TYPE>
             *BASE::conn, propMatchRule,
             std::bind_front(&DbusPropertyWatcher::handlePropertyChange, this));
     }
-
+    void printChangedProperties(
+        const std::map<std::string, std::variant<PropType>>& changedProperties)
+    {
+        for (const auto& [key, value] : changedProperties)
+        {
+            if (std::holds_alternative<PropType>(value))
+            {
+                auto val = std::get<PropType>(value);
+                LOG_DEBUG("Changed Property: {} Value: {}", key, val);
+            }
+            else
+            {
+                LOG_DEBUG("Changed Property: {} Value: <non-string type>", key);
+            }
+        }
+    }
     void handlePropertyChange(sdbusplus::message_t& msg)
     {
         std::string interfaceName;
-        std::map<std::string, std::variant<PropType>> changedProperties;
+        PropertyMap changedProperties;
         std::vector<std::string> invalidatedProperties;
 
         msg.read(interfaceName, changedProperties, invalidatedProperties);
 
         LOG_INFO("Properties changed on interface: {}", interfaceName);
+        // printChangedProperties(changedProperties);
+        auto [ec, ipaddress] =
+            getPropertiesFromMap<PropType>(changedProperties, propName);
 
-        changedProperties | std::ranges::views::filter([&](const auto& p) {
-            return p.first == propName;
-        });
-        if (changedProperties.empty())
+        if (ec && ec != boost::asio::error::not_found)
         {
-            LOG_ERROR("Property {} not found in changed properties", propName);
-            BASE::notifyChange(PropType{});
+            LOG_ERROR("Error getting property {}: {}", propName, ec.message());
+            BASE::notifyChange(ec, PropType{});
             return;
         }
-        auto it = changedProperties.begin();
-        if (!std::holds_alternative<PropType>(it->second))
-        {
-            LOG_ERROR("Property {} is not of type string", propName);
-            BASE::notifyChange(PropType{});
-            return;
-        }
-        auto result = std::get<PropType>(it->second);
-        LOG_DEBUG("Property {} changed: {}", propName, result);
-        BASE::notifyChange(result);
+        LOG_DEBUG("Property {} changed: {}", propName, ipaddress);
+        BASE::notifyChange(boost::system::error_code{}, ipaddress);
     }
 };
 template <typename TYPE>
@@ -288,15 +298,17 @@ struct DbusSignalWatcher : public DbusWatcher<DbusSignalWatcher<TYPE>, TYPE>
 
     void addMatch()
     {
+        LOG_DEBUG("Adding signal match rule: {}", signalMatchRule);
         BASE::match.emplace(
             *BASE::conn, signalMatchRule,
-            std::bind_front(&DbusSignalWatcher::hanleSignalChange, this));
+            std::bind_front(&DbusSignalWatcher::handleSignalChange, this));
     }
-    void hanleSignalChange(sdbusplus::message_t& msg)
+    void handleSignalChange(sdbusplus::message_t& msg)
     {
         if constexpr (std::is_same_v<PropType, sdbusplus::message_t>)
         {
-            BASE::notifyChange(msg);
+            LOG_DEBUG("Received Signal message");
+            BASE::notifyChange(boost::system::error_code{}, std::move(msg));
             return;
         }
         else
@@ -304,7 +316,7 @@ struct DbusSignalWatcher : public DbusWatcher<DbusSignalWatcher<TYPE>, TYPE>
             PropType value;
             msg.read(value);
             LOG_DEBUG("Recieved Signal value {}", value);
-            BASE::notifyChange(value);
+            BASE::notifyChange(boost::system::error_code{}, value);
         }
     }
 };

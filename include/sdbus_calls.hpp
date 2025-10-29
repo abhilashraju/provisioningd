@@ -11,6 +11,10 @@
 #include <sdbusplus/timer.hpp>
 namespace NSNAME
 {
+using PropertyMap =
+    std::map<std::string, std::variant<bool, int32_t, std::string>>;
+using InterfaceMap = std::map<std::string, PropertyMap>;
+
 template <typename... RetTypes, typename... InputArgs>
 inline auto awaitable_dbus_method_call(
     sdbusplus::asio::connection& conn, const std::string& service,
@@ -69,17 +73,14 @@ inline AwaitableResult<boost::system::error_code> setProperty(
     co_return co_await h();
 }
 
-template <typename VariantType>
-inline AwaitableResult<std::vector<std::pair<std::string, VariantType>>>
-    getAllProperties(sdbusplus::asio::connection& bus,
-                     const std::string& service, const std::string& path,
-                     const std::string& interface)
+inline AwaitableResult<PropertyMap> getAllProperties(
+    sdbusplus::asio::connection& bus, const std::string& service,
+    const std::string& path, const std::string& interface)
 {
-    using ReturnType = std::vector<std::pair<std::string, VariantType>>;
-    auto h = make_awaitable_handler<ReturnType>([&](auto promise) {
+    auto h = make_awaitable_handler<PropertyMap>([&](auto promise) {
         bus.async_method_call(
             [promise = std::move(promise)](boost::system::error_code ec,
-                                           const ReturnType& data) mutable {
+                                           const PropertyMap& data) mutable {
                 promise.setValues(ec, data);
             },
             service, path, "org.freedesktop.DBus.Properties", "GetAll",
@@ -304,4 +305,65 @@ inline AwaitableResult<std::string> introspect(
     });
     co_return co_await h();
 }
+// Modify this for any special default types with special default values
+template <typename T>
+T getDefaultValue()
+{
+    if constexpr (std::is_same_v<T, std::string>)
+    {
+        return {};
+    }
+    else
+    {
+        return {};
+    }
 }
+
+template <typename T>
+T getPropertyFromMap(boost::system::error_code& ec, const PropertyMap& propMap,
+                     const std::string& argname)
+{
+    if (ec)
+    {
+        LOG_ERROR("Already failed for previous properties in map retrieval");
+        return getDefaultValue<T>();
+    }
+    auto iter = propMap.find(argname);
+    if (iter == propMap.end())
+    {
+        LOG_ERROR("Failed to find LLDP property {}", argname);
+        ec = boost::asio::error::not_found;
+        return getDefaultValue<T>();
+    }
+    if (!std::holds_alternative<T>(iter->second))
+    {
+        LOG_ERROR("Type mismatch for LLDP property {}", argname);
+        ec = boost::asio::error::invalid_argument;
+        return getDefaultValue<T>();
+    }
+    return std::get<T>(iter->second);
+}
+
+template <typename... ArgTypes, typename... Args, std::size_t... I>
+inline std::tuple<ArgTypes...> getPropertiesFromMapImpl(
+    boost::system::error_code& ec, const PropertyMap& propMap,
+    std::index_sequence<I...>, const Args&... args)
+{
+    // Make sure ArgTypes and Args have the same size
+    static_assert(sizeof...(ArgTypes) == sizeof...(Args),
+                  "Size mismatch between types and arguments");
+    return std::make_tuple(
+        getPropertyFromMap<std::tuple_element_t<I, std::tuple<ArgTypes...>>>(
+            ec, propMap, std::get<I>(std::forward_as_tuple(args...)))...);
+}
+
+template <typename... ArgTypes, typename... Args>
+inline std::tuple<boost::system::error_code, ArgTypes...> getPropertiesFromMap(
+    const PropertyMap& propMap, const Args&... args)
+{
+    boost::system::error_code ec{};
+    auto t = getPropertiesFromMapImpl<ArgTypes...>(
+        ec, propMap, std::index_sequence_for<ArgTypes...>{}, args...);
+    return std::tuple_cat(std::make_tuple(ec), t);
+}
+} // namespace NSNAME

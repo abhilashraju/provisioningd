@@ -33,9 +33,6 @@ using DbusObjectPath = std::string;
 using DbusInterface = std::string;
 using PropertyValue = std::string;
 using DbusService = std::string;
-using InterfaceMap =
-    std::map<std::string,
-             std::map<std::string, std::variant<bool, int32_t, std::string>>>;
 
 net::awaitable<void> waitFor(net::io_context& io_context,
                              std::chrono::seconds duration)
@@ -43,8 +40,21 @@ net::awaitable<void> waitFor(net::io_context& io_context,
     net::steady_timer timer(io_context, duration);
     co_await timer.async_wait(net::use_awaitable);
 }
-
-net::awaitable<bool> monitorBmc(net::io_context& io_context, TcpClient& client)
+net::awaitable<std::optional<std::string>> getRemoteIp(
+    sdbusplus::asio::connection& conn, const std::string& iface)
+{
+    auto [ec, propVal] = co_await getProperty<std::string>(
+        conn, LLDP_SVC, std::format(LLDP_REC_PATH, iface), LLDP_INTF,
+        LLDP_PROP);
+    if (ec)
+    {
+        LOG_ERROR("Failed to get LLDP property: {}", ec.message());
+        co_return std::nullopt;
+    }
+    co_return std::optional(propVal);
+}
+net::awaitable<bool> monitorBmc(net::io_context& io_context, TcpClient& client,
+                                bool needping = false)
 {
     std::string message("Hello");
     auto [ec, bytes] = co_await client.write(net::buffer(message));
@@ -67,14 +77,17 @@ net::awaitable<bool> monitorBmc(net::io_context& io_context, TcpClient& client)
             co_return false;
         }
         LOG_INFO("Received from BMC: {}", std::string(data.data(), bytes));
-        std::string ping("ping");
-        auto [ecw, bytesw] = co_await client.write(net::buffer(ping));
-        if (ecw)
+        if (needping)
         {
-            LOG_ERROR("Send error: {}", ecw.message());
-            co_return false;
+            std::string ping("ping");
+            auto [ecw, bytesw] = co_await client.write(net::buffer(ping));
+            if (ecw)
+            {
+                LOG_ERROR("Send error: {}", ecw.message());
+                co_return false;
+            }
+            co_await waitFor(io_context, 5s);
         }
-        co_await waitFor(io_context, 30s);
     }
     co_return false;
 }
@@ -156,65 +169,60 @@ std::shared_ptr<BmcResponder> makeBmcResponder(
     });
     return bmcResponder;
 }
-net::awaitable<void> updateNeighbourDetails(
+net::awaitable<void> tryConnectIfNeighbourFound(
     net::io_context& io_context,
     std::shared_ptr<sdbusplus::asio::connection> conn,
-    ProvisioningController& controller, short rport)
+    ProvisioningController& controller, short rport, const std::string& iface)
 {
-    auto [ec, propVal] = co_await getProperty<std::string>(
-        *conn, LLDP_SVC, std::format(LLDP_REC_PATH, "eth1"), LLDP_INTF,
-        LLDP_PROP);
-    if (ec)
+    auto propVal = co_await getRemoteIp(*conn, iface);
+    if (propVal)
     {
-        LOG_ERROR("Failed to get LLDP property: {}", ec.message());
-        co_return;
+        LOG_INFO("LLDP ManagementAddressIPv4: {}", *propVal);
+        co_await tryConnect(io_context, *propVal, rport, controller);
     }
-    LOG_INFO("LLDP ManagementAddressIPv4: {}", propVal);
-    co_await tryConnect(io_context, propVal, rport, controller);
     co_return;
 }
 net::awaitable<void> onNeighbhorFound(
     net::io_context& io_context, ProvisioningController& controller,
-    short rport, const boost::system::error_code& ec, std::string ip)
+    short rport, const boost::system::error_code& ec,
+    std::optional<std::string> ip)
 {
     if (ec)
     {
         co_return;
     }
-    LOG_INFO("LLDP Neighbour IP found: {}", ip);
+    LOG_INFO("LLDP Neighbour IP found: {}", *ip);
     if (controller.peerConnected() ==
         ProvisioningIface::PeerConnectionStatus::Connected)
     {
         LOG_INFO("Peer already connected, skipping connection attempt");
         co_return;
     }
-    co_await tryConnect(io_context, ip, rport, controller);
+    co_await tryConnect(io_context, *ip, rport, controller);
     co_return;
 }
 net::awaitable<void> onSpdmStateChange(
-    net::io_context& io_context, const std::string& ip, short sport,
-    ProvisioningController& controller,
-    std::shared_ptr<BmcResponder>& bmcResponder, short rport,
-    const boost::system::error_code& ec, bool val)
+    net::io_context& io_context, short port, ProvisioningController& controller,
+    std::shared_ptr<BmcResponder>& bmcResponder,
+    const boost::system::error_code& ec, std::optional<bool> val)
 {
     if (ec)
     {
         co_return;
     }
-    controller.setProvisioned(val);
-    if (val)
+    controller.setProvisioned(*val);
+    if (*val)
     {
         LOG_INFO("SPDM provisioning completed successfully");
-        if (bmcResponder)
-        {
-            bmcResponder.reset();
-        }
+        bmcResponder.reset();
         auto sslContext = getServerContext();
-        if (sslContext)
+        if (!sslContext)
         {
-            bmcResponder = makeBmcResponder(io_context, std::move(*sslContext),
-                                            sport, controller);
+            LOG_ERROR("ssl context is not available");
+            co_return;
         }
+        bmcResponder = makeBmcResponder(io_context, std::move(*sslContext),
+                                        port, controller);
         co_return;
     }
     LOG_INFO("SPDM provisioning completed with failed status");
@@ -222,15 +230,15 @@ net::awaitable<void> onSpdmStateChange(
 net::awaitable<void> startSpdm(
     sdbusplus::asio::connection& conn,
     std::shared_ptr<DbusSignalWatcher<bool>> watcher, net::io_context& ioc,
-    const std::string& ip, short port, ProvisioningController& controller,
-    std::shared_ptr<BmcResponder>& bmcResponder, short bmcport)
+    short port, const std::string& iface, ProvisioningController& controller,
+    std::shared_ptr<BmcResponder>& bmcResponder, const std::string& deviceName)
 {
     try
     {
         // This method would start the SPDM provisioning process.
         // Implementation would depend on the specific requirements.
         LOG_INFO("Starting SPDM provisioning");
-        auto device = std::format(SPDM_DEVICE_PATH, "device1");
+        auto device = std::format(SPDM_DEVICE_PATH, deviceName);
         auto [ec, msg] =
             co_await awaitable_dbus_method_call<sdbusplus::message_t>(
                 conn, SPDM_SVC, device, SPDM_DEVICE_INTF, "attest");
@@ -242,12 +250,17 @@ net::awaitable<void> startSpdm(
         if (val && *val)
         {
             controller.peerProvisioned(true);
-            net::co_spawn(ioc,
-                          std::bind_front(tryConnect, std::ref(ioc), ip,
-                                          bmcport, std::ref(controller)),
-                          net::detached);
-            co_return;
+            auto ip = co_await getRemoteIp(conn, iface);
+            if (ip)
+            {
+                net::co_spawn(ioc,
+                              std::bind_front(tryConnect, std::ref(ioc), *ip,
+                                              port, std::ref(controller)),
+                              net::detached);
+                co_return;
+            }
         }
+        LOG_ERROR("SPDM provisioning failed or timed out");
         controller.peerProvisioned(false);
     }
     catch (std::exception& e)
@@ -265,10 +278,9 @@ int main(int argc, const char* argv[])
         net::io_context io_context;
         std::ifstream confFile("/var/provisioning/provisioning.conf");
         auto confJson = nlohmann::json::parse(confFile);
-        auto rport = confJson.value("rport", 8090);
-        auto sport = confJson.value("port", 8091);
-        auto ip = confJson.value("rip", std::string{"127.0.0.1"});
+        auto port = confJson.value("port", 8090);
         cert_root = confJson.value("cert_root", std::string{"/tmp/1222/"});
+        auto iface = confJson.value("interface_id", std::string{"eth2"});
 
         auto conn = std::make_shared<sdbusplus::asio::connection>(io_context);
         ProvisioningController controller(io_context, conn);
@@ -278,36 +290,35 @@ int main(int argc, const char* argv[])
         if (sslCtx)
         {
             bmcResponder = makeBmcResponder(io_context, std::move(*sslCtx),
-                                            sport, controller);
+                                            port, controller);
         }
-        controller.setProvisionHandler([&]() {
+        controller.setProvisionHandler([&](const std::string& deviceName) {
             LOG_INFO("Provisioning started");
             auto watcherPtr = std::make_shared<DbusSignalWatcher<bool>>(
                 conn, SPDM_DEVICE_INTF, SPDM_REQ_SIGNAL);
             net::co_spawn(io_context,
                           std::bind_front(startSpdm, std::ref(*conn),
-                                          watcherPtr, std::ref(io_context), ip,
-                                          rport, std::ref(controller),
-                                          std::ref(bmcResponder), sport),
+                                          watcherPtr, std::ref(io_context),
+                                          port, iface, std::ref(controller),
+                                          std::ref(bmcResponder), deviceName),
                           net::detached);
         });
 
         DbusSignalWatcher<bool>::watch(
             io_context, conn,
-            std::bind_front(onSpdmStateChange, std::ref(io_context), ip, sport,
-                            std::ref(controller), std::ref(bmcResponder),
-                            rport),
+            std::bind_front(onSpdmStateChange, std::ref(io_context), port,
+                            std::ref(controller), std::ref(bmcResponder)),
             SPDM_RES_INTF, SPDM_RES_SIGNAL);
         DbusPropertyWatcher<std::string>::watch(
             io_context, conn,
             std::bind_front(onNeighbhorFound, std::ref(io_context),
-                            std::ref(controller), rport),
-            std::format(LLDP_REC_PATH, "eth1"), LLDP_INTF, LLDP_PROP);
+                            std::ref(controller), port),
+            std::format(LLDP_REC_PATH, iface), LLDP_INTF, LLDP_PROP);
 
         net::co_spawn(
             io_context,
-            std::bind_front(updateNeighbourDetails, std::ref(io_context), conn,
-                            std::ref(controller), rport),
+            std::bind_front(tryConnectIfNeighbourFound, std::ref(io_context),
+                            conn, std::ref(controller), port, iface),
             net::detached);
         io_context.run();
     }

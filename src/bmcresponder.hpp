@@ -14,7 +14,9 @@ struct BmcResponder
     BmcResponder(net::io_context& ctx, ssl::context sslctx, short port) :
         ssl(std::move(sslctx)), acceptor(ctx.get_executor(), port, ssl),
         server(ctx.get_executor(), acceptor, *this)
-    {}
+    {
+        LOG_INFO("BMC Responder started on port {}", port);
+    }
     void onConnectionChange(WatcherCallback callback)
     {
         watcherCallback = std::move(callback);

@@ -18,6 +18,7 @@
 #include <nlohmann/json.hpp>
 
 #include <csignal>
+
 static constexpr auto LLDP_SVC = "xyz.openbmc_project.LLDP";
 static constexpr auto LLDP_PATH = "/xyz/openbmc_project/network/lldp/{}";
 static constexpr auto LLDP_INTF = "xyz.openbmc_project.Network.LLDP.TLVs";
@@ -100,11 +101,39 @@ net::awaitable<void> onNeighbhorFound(
     sdbusplus::asio::object_server& dbusServer, SpdmHandler& spdmHandler,
     SpdmResponderIface& spdmResponder,
     std::shared_ptr<SpdmDeviceIface>& spdmDevice, const std::string& remotePort,
-    const boost::system::error_code& ec, const std::string& propVal)
+    const boost::system::error_code& ec, std::optional<sdbusplus::message_t> m)
 {
-    LOG_INFO("Neighbour LLDP ManagementAddressIPv4 changed: {}", propVal);
-    SpdmDeviceIface::ResponderInfo responderInfo{"device1", propVal,
-                                                 remotePort};
+    if (!m)
+    {
+        LOG_ERROR("Failed to get LLDP interface signal change");
+        co_return;
+    }
+    InterfaceMap interfaces;
+    sdbusplus::message::object_path objPath;
+    m->read(objPath, interfaces);
+    auto it = interfaces.find(LLDP_INTF);
+    if (it == interfaces.end())
+    {
+        LOG_ERROR("Failed to find LLDP interface in signal");
+        co_return;
+    }
+
+    auto propMap = it->second;
+    auto [ec1, address, name] = getPropertiesFromMap<std::string, std::string>(
+        propMap, "ManagementAddressIPv4", "SystemName");
+    if (ec1)
+    {
+        LOG_ERROR("Failed to get LLDP properties: {}", ec.message());
+        co_return;
+    }
+    if (address.empty() || name.empty())
+    {
+        LOG_ERROR("LLDP Address or Name is empty");
+        co_return;
+    }
+
+    LOG_INFO("Neighbour LLDP Address : {} Name : {} ", address, name);
+    SpdmDeviceIface::ResponderInfo responderInfo{name, address, remotePort};
     spdmDevice.reset();
     spdmDevice = std::make_shared<SpdmDeviceIface>(conn, dbusServer,
                                                    responderInfo, spdmHandler);
@@ -116,20 +145,31 @@ net::awaitable<void> updateNeighbourDetails(
     std::shared_ptr<sdbusplus::asio::connection> conn,
     sdbusplus::asio::object_server& dbusServer, SpdmHandler& spdmHandler,
     SpdmResponderIface& spdmResponder,
-    std::shared_ptr<SpdmDeviceIface>& spdmDevice, const std::string& remotePort)
+    std::shared_ptr<SpdmDeviceIface>& spdmDevice, const std::string& remotePort,
+    const std::string& iface)
 
 {
-    auto [ec, propVal] = co_await getProperty<std::string>(
-        *conn, LLDP_SVC, std::format(LLDP_REC_PATH, "eth1"), LLDP_INTF,
-        LLDP_PROP);
+    auto [ec, properties] = co_await getAllProperties(
+        *conn, LLDP_SVC, std::format(LLDP_REC_PATH, iface), LLDP_INTF);
     if (ec)
     {
         LOG_ERROR("Failed to get LLDP property: {}", ec.message());
         co_return;
     }
-    LOG_INFO("LLDP ManagementAddressIPv4: {}", propVal);
-    SpdmDeviceIface::ResponderInfo responderInfo{"device1", propVal,
-                                                 remotePort};
+    auto [ec1, address, name] = getPropertiesFromMap<std::string, std::string>(
+        properties, "ManagementAddressIPv4", "SystemName");
+    if (ec1)
+    {
+        LOG_ERROR("Failed to get LLDP properties: {}", ec.message());
+        co_return;
+    }
+    if (address.empty() || name.empty())
+    {
+        LOG_ERROR("LLDP Address or Name is empty");
+        co_return;
+    }
+    LOG_INFO("LLDP ManagementAddressIPv4: {} Name: {}", address, name);
+    SpdmDeviceIface::ResponderInfo responderInfo{name, address, remotePort};
     spdmDevice = std::make_shared<SpdmDeviceIface>(conn, dbusServer,
                                                    responderInfo, spdmHandler);
     intialiseSpdmHandler(spdmHandler, *spdmDevice, spdmResponder);
@@ -148,18 +188,24 @@ int main(int argc, const char* argv[])
     {
         auto json = nlohmann::json::parse(std::ifstream(conf.value().data()));
 
-        auto servercert = json.value("server-cert", std::string{});
-        auto serverprivkey = json.value("server-pkey", std::string{});
-        auto clientcert = json.value("client-cert", std::string{});
-        auto clientprivkey = json.value("client-pkey", std::string{});
-        auto signprivkey = json.value("sign-privkey", std::string{});
-        auto signcert = json.value("sign-cert", std::string{});
-        auto caCert = json.value("verify-cert", std::string{});
+        auto servercert = json.value(
+            "server-cert", std::string{"/etc/ssl/certs/https/server.mtls.pem"});
+        auto serverprivkey = json.value(
+            "server-pkey", std::string{"/etc/ssl/private/server.mtls.key"});
+        auto clientcert = json.value(
+            "client-cert", std::string{"/etc/ssl/certs/https/client.mtls.pem"});
+        auto clientprivkey = json.value(
+            "client-pkey", std::string{"/etc/ssl/private/client.mtls.key"});
+        auto signprivkey = json.value(
+            "sign-privkey", std::string{"/etc/ssl/private/server.mtls.key"});
+        auto signcert = json.value(
+            "sign-cert", std::string{"/etc/ssl/certs/https/server.mtls.pem"});
+        auto caCert =
+            json.value("verify-cert", std::string{"/etc/ssl/certs/bmc.ca.pem"});
         auto port = json.value("port", std::string{});
         auto myip = json.value("ip", std::string{"0.0.0.0"});
-        auto rip = json.value("remote_ip", std::string{});
-        auto rp = json.value("remote_port", std::string{});
-        prefix = json.value("prefix", std::string{});
+        auto iface = json.value("interface_id", std::string{"eth2"});
+        prefix = json.value("exchange_prefix", std::string{});
         std::vector<std::string> resources =
             json.value("resources", std::vector<std::string>{});
         auto maxConnections = 1;
@@ -203,18 +249,20 @@ int main(int argc, const char* argv[])
         sdbusplus::asio::object_server dbusServer(conn);
         std::shared_ptr<SpdmDeviceIface> spdmDevice;
         SpdmResponderIface spdmResponder(conn, dbusServer, "responder1");
-        DbusPropertyWatcher<std::string>::watch(
+        DbusSignalWatcher<sdbusplus::message_t>::watch(
             io_context, conn,
             std::bind_front(onNeighbhorFound, std::ref(io_context), conn,
                             std::ref(dbusServer), std::ref(spdmHandler),
-                            std::ref(spdmResponder), std::ref(spdmDevice), rp),
-            std::format(LLDP_REC_PATH, "eth1"), LLDP_INTF, LLDP_PROP);
-
+                            std::ref(spdmResponder), std::ref(spdmDevice),
+                            port),
+            sdbusplus::bus::match::rules::interfacesAddedAtPath(
+                std::format(LLDP_REC_PATH, iface)));
         net::co_spawn(
             io_context,
             std::bind_front(updateNeighbourDetails, std::ref(io_context), conn,
                             std::ref(dbusServer), std::ref(spdmHandler),
-                            std::ref(spdmResponder), std::ref(spdmDevice), rp),
+                            std::ref(spdmResponder), std::ref(spdmDevice), port,
+                            iface),
             net::detached);
         conn->request_name(SpdmDeviceIface::busName);
         io_context.run();

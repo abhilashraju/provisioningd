@@ -15,7 +15,7 @@ struct ProvisioningController : Ifaces
     PeerConnectionStatus trustedConnectionState{
         PeerConnectionStatus::NotDetermined};
     bool provState{false};
-    using PROVISIONING_HANDLER = std::function<void()>;
+    using PROVISIONING_HANDLER = std::function<void(const std::string&)>;
     PROVISIONING_HANDLER provisionHandler;
 
     static constexpr auto busName = "xyz.openbmc_project.Provisioning";
@@ -35,9 +35,9 @@ struct ProvisioningController : Ifaces
         ioContext(ctx), conn(conn)
 
     {}
-    void provisionPeer(std::string bmcId) override
+    void provisionPeer(std::string deviceId) override
     {
-        provisionHandler();
+        provisionHandler(deviceId);
     }
     void setProvisionHandler(PROVISIONING_HANDLER handler)
     {

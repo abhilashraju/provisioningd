@@ -6,9 +6,12 @@
 using namespace NSNAME;
 constexpr auto INSTALL_CERTIFICATES = "InstallCertificates";
 constexpr auto INSTALL_CERTIFICATES_RESP = "InstallCertificatesResp";
+using ENTITY_DATA = std::tuple<const char*, std::string, std::string>;
+template <int COUNT>
 std::optional<std::pair<X509Ptr, EVP_PKEYPtr>> createAndSaveEntityCertificate(
     const EVP_PKEYPtr& ca_pkey, const X509Ptr& ca,
-    const std::string& common_name, bool server)
+    const std::string& common_name,
+    const std::array<ENTITY_DATA, COUNT>& entity_data, int index)
 {
     auto ca_name = openssl_ptr<X509_NAME, X509_NAME_free>(
         X509_NAME_dup(X509_get_subject_name(ca.get())), X509_NAME_free);
@@ -19,12 +22,6 @@ std::optional<std::pair<X509Ptr, EVP_PKEYPtr>> createAndSaveEntityCertificate(
         LOG_ERROR("Failed to create entity certificate");
         return std::nullopt;
     }
-    using ENTITY_DATA = std::tuple<const char*, std::string, std::string>;
-    std::array<ENTITY_DATA, 2> entity_data = {
-        ENTITY_DATA{"clientAuth", CLIENT_PKEY_PATH(),
-                    ENTITY_CLIENT_CERT_PATH()},
-        ENTITY_DATA{"serverAuth", SERVER_PKEY_PATH(),
-                    ENTITY_SERVER_CERT_PATH()}};
 
     // Add serverAuth extended key usage
     // openssl_ptr<X509_EXTENSION, X509_EXTENSION_free> ext(
@@ -37,25 +34,24 @@ std::optional<std::pair<X509Ptr, EVP_PKEYPtr>> createAndSaveEntityCertificate(
     //     return std::nullopt;
     // }
     // X509_add_ext(cert.get(), ext.get(), -1);
-    if (!savePrivateKey(std::get<1>(entity_data[server]), key))
+    if (!savePrivateKey(std::get<1>(entity_data[index]), key))
     {
         LOG_ERROR("Failed to save private key to {}",
-                  std::get<1>(entity_data[server]));
+                  std::get<1>(entity_data[index]));
         return std::nullopt;
     }
     std::vector<X509*> cert_chain;
     cert_chain.emplace_back(cert.get());
     cert_chain.emplace_back(ca.get());
-    std::string filename = std::get<2>(entity_data[server]);
+    std::string filename = std::get<2>(entity_data[index]);
     if (!saveCertificate(filename, cert_chain))
     {
         LOG_ERROR("Failed to save entity certificate to {}",
-                  std::get<2>(entity_data[server]));
+                  std::get<2>(entity_data[index]));
         return std::nullopt;
     }
     LOG_DEBUG("Entity certificate and private key saved to {} and {}",
-              std::get<2>(entity_data[server]),
-              std::get<1>(entity_data[server]));
+              std::get<2>(entity_data[index]), std::get<1>(entity_data[index]));
     return std::make_optional(std::make_pair(std::move(cert), std::move(key)));
 }
 struct CertificateExchanger
@@ -118,17 +114,22 @@ struct CertificateExchanger
             LOG_ERROR("Failed to read CA certificate from provided data");
             return false;
         }
+        std::array<ENTITY_DATA, 2> entity_data = {
+            ENTITY_DATA{"clientAuth", CLIENT_PKEY_PATH(),
+                        ENTITY_CLIENT_CERT_PATH()},
+            ENTITY_DATA{"serverAuth", SERVER_PKEY_PATH(),
+                        ENTITY_SERVER_CERT_PATH()}};
         auto caname = openssl_ptr<X509_NAME, X509_NAME_free>(
             X509_NAME_dup(X509_get_subject_name(ca.get())), X509_NAME_free);
-        auto servCert =
-            createAndSaveEntityCertificate(pkey, ca, "BMC Entity", true);
+        auto servCert = createAndSaveEntityCertificate<2>(
+            pkey, ca, "BMC Entity", entity_data, 1);
         if (!servCert)
         {
             LOG_ERROR("Failed to create server entity certificate");
             return false;
         }
-        auto clientCert =
-            createAndSaveEntityCertificate(pkey, ca, "BMC Entity", false);
+        auto clientCert = createAndSaveEntityCertificate<2>(
+            pkey, ca, "BMC Entity", entity_data, 0);
         if (!clientCert)
         {
             LOG_ERROR("Failed to create client entity certificate");

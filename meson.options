@@ -1,0 +1,6 @@
+option(
+    'attestation_stub',
+    type: 'boolean',
+    description: 'Enables attestation stub',
+    value:true
+)

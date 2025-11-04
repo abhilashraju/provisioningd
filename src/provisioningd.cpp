@@ -1,4 +1,5 @@
 #include "bmcresponder.hpp"
+#include "cert_generator.hpp"
 #include "command_line_parser.hpp"
 #include "dbusproperty_watcher.hpp"
 #include "provisioning_object.hpp"
@@ -275,6 +276,7 @@ int main(int argc, const char* argv[])
     {
         auto& logger = getLogger();
         logger.setLogLevel(LogLevel::DEBUG);
+        Tpm2::getInstance(); // Initialize TPM2 provider
         net::io_context io_context;
         std::ifstream confFile("/var/provisioning/provisioning.conf");
         auto confJson = nlohmann::json::parse(confFile);

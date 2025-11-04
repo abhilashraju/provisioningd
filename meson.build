@@ -1,6 +1,6 @@
 project('provisioningd', 'cpp',default_options: ['cpp_std=c++23','buildtype=debugoptimized',])
 boost_dep = dependency('boost', modules: ['url'], required: true)
-openssl_dep = dependency('openssl', required: true)
+openssl_dep = dependency('openssl', version: '>= 3.0', required: true)
 sdeventplus_dep = dependency('sdeventplus')
 sdbusplus_dep =dependency('sdbusplus')
 dbus_interfaces_dep =dependency('phosphor-dbus-interfaces')

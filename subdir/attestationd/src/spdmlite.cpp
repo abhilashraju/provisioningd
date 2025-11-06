@@ -6,6 +6,7 @@
 #include "eventmethods.hpp"
 #include "eventqueue.hpp"
 #include "logger.hpp"
+#include "root_certs.hpp"
 #include "sdbus_calls.hpp"
 #include "spdm_handshake.hpp"
 #include "spdmdeviceiface.hpp"
@@ -18,7 +19,6 @@
 #include <nlohmann/json.hpp>
 
 #include <csignal>
-
 static constexpr auto LLDP_SVC = "xyz.openbmc_project.LLDP";
 static constexpr auto LLDP_PATH = "/xyz/openbmc_project/network/lldp/{}";
 static constexpr auto LLDP_INTF = "xyz.openbmc_project.Network.LLDP.TLVs";
@@ -28,7 +28,7 @@ static constexpr auto LLDP_REC_PATH =
 std::string prefix;
 ssl::context loadServerContext(const std::string& servercert,
                                const std::string& privKey,
-                               const std::string& trustStore)
+                               const std::string& trustStore, bool selfsigned)
 {
     ssl::context ssl_server_context(ssl::context::sslv23_server);
 
@@ -38,7 +38,14 @@ ssl::context loadServerContext(const std::string& servercert,
         boost::asio::ssl::context::no_sslv2 |
         boost::asio::ssl::context::single_dh_use);
     ssl_server_context.load_verify_file(trustStore);
-    ssl_server_context.set_verify_mode(boost::asio::ssl::verify_peer);
+    if (selfsigned)
+    {
+        ssl_server_context.set_verify_mode(boost::asio::ssl::verify_none);
+    }
+    else
+    {
+        ssl_server_context.set_verify_mode(boost::asio::ssl::verify_peer);
+    }
     ssl_server_context.use_certificate_chain_file(servercert);
     ssl_server_context.use_private_key_file(privKey,
                                             boost::asio::ssl::context::pem);
@@ -74,6 +81,29 @@ void combineContexts(ssl::context& defaultCtx,
             return SSL_CLIENT_HELLO_SUCCESS;
         },
         &ctxMap);
+}
+ssl::context loadClientContext(const std::string& clientcert,
+                               const std::string& privKey,
+                               const std::string& caCert, bool selfsigned)
+{
+    ssl::context ssl_client_context(ssl::context::sslv23_client);
+    ssl_client_context.set_options(
+        boost::asio::ssl::context::default_workarounds |
+        boost::asio::ssl::context::no_sslv2 |
+        boost::asio::ssl::context::single_dh_use);
+    ssl_client_context.load_verify_file(caCert);
+    if (selfsigned)
+    {
+        ssl_client_context.set_verify_mode(boost::asio::ssl::verify_none);
+    }
+    else
+    {
+        ssl_client_context.set_verify_mode(boost::asio::ssl::verify_peer);
+    }
+    ssl_client_context.use_certificate_chain_file(clientcert);
+    ssl_client_context.use_private_key_file(privKey,
+                                            boost::asio::ssl::context::pem);
+    return ssl_client_context;
 }
 void intialiseSpdmHandler(SpdmHandler& spdmHandler,
                           SpdmDeviceIface& deviceIface,
@@ -174,6 +204,7 @@ net::awaitable<void> updateNeighbourDetails(
                                                    responderInfo, spdmHandler);
     intialiseSpdmHandler(spdmHandler, *spdmDevice, spdmResponder);
 }
+
 int main(int argc, const char* argv[])
 {
     auto [conf] = getArgs(parseCommandline(argc, argv), "--conf,-c");
@@ -197,11 +228,12 @@ int main(int argc, const char* argv[])
         auto clientprivkey = json.value(
             "client-pkey", std::string{"/etc/ssl/private/client.mtls.key"});
         auto signprivkey = json.value(
-            "sign-privkey", std::string{"/etc/ssl/private/server.mtls.key"});
+            "sign-privkey", std::string{"/etc/ssl/private/signing.key"});
         auto signcert = json.value(
-            "sign-cert", std::string{"/etc/ssl/certs/https/server.mtls.pem"});
+            "sign-cert", std::string{"/etc/ssl/certs/https/signing.pem"});
         auto caCert =
             json.value("verify-cert", std::string{"/etc/ssl/certs/bmc.ca.pem"});
+        auto self_signed = json.value("self-signed", false);
         auto port = json.value("port", std::string{});
         auto myip = json.value("ip", std::string{"0.0.0.0"});
         auto iface = json.value("interface_id", std::string{"eth2"});
@@ -213,18 +245,15 @@ int main(int argc, const char* argv[])
         auto& logger = reactor::getLogger();
         logger.setLogLevel(reactor::LogLevel::DEBUG);
         net::io_context io_context;
-
-        ssl::context ssl_client_context(ssl::context::sslv23_client);
-        ssl_client_context.set_options(
-            boost::asio::ssl::context::default_workarounds |
-            boost::asio::ssl::context::no_sslv2 |
-            boost::asio::ssl::context::single_dh_use);
-        ssl_client_context.load_verify_file(caCert);
-        ssl_client_context.set_verify_mode(boost::asio::ssl::verify_peer);
-        ssl_client_context.use_certificate_chain_file(clientcert);
-        ssl_client_context.use_private_key_file(clientprivkey,
-                                                boost::asio::ssl::context::pem);
-        auto serverCtx = loadServerContext(servercert, serverprivkey, caCert);
+        if (!ensureCertificates(servercert, self_signed))
+        {
+            LOG_ERROR("Failed to ensure server certificates");
+            return 1;
+        }
+        ssl::context ssl_client_context =
+            loadClientContext(clientcert, clientprivkey, caCert, self_signed);
+        auto serverCtx =
+            loadServerContext(servercert, serverprivkey, caCert, self_signed);
         TcpStreamType acceptor(io_context.get_executor(), myip,
                                std::atoi(port.data()), serverCtx);
         EventQueue eventQueue(io_context.get_executor(), acceptor,
@@ -242,9 +271,12 @@ int main(int argc, const char* argv[])
             MeasurementTaker(loadPrivateKey(signprivkey)),
             MeasurementVerifier(getPublicKeyFromCert(verifyCert)), eventQueue,
             io_context);
-        for (const auto& resource : resources)
+        if (!self_signed) // skip mesauement for self signed certs
         {
-            spdmHandler.addToMeasure(resource);
+            for (const auto& resource : resources)
+            {
+                spdmHandler.addToMeasure(resource);
+            }
         }
         sdbusplus::asio::object_server dbusServer(conn);
         std::shared_ptr<SpdmDeviceIface> spdmDevice;

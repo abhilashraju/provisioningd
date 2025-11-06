@@ -1,20 +1,26 @@
 #pragma once
-#include "globaldefs.hpp"
 #include "logger.hpp"
 
+#include <dlfcn.h>
+#include <err.h>
+#include <openssl/core.h>
 #include <openssl/core_names.h>
+#include <openssl/err.h>
 #include <openssl/evp.h>
+#include <openssl/opensslv.h>
 #include <openssl/param_build.h>
 #include <openssl/pem.h>
+#include <openssl/provider.h>
 #include <openssl/rsa.h>
+#include <openssl/ssl.h>
+#include <openssl/store.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
-
-#include <boost/asio/ssl.hpp>
 
 #include <fstream>
 #include <memory>
 #include <string>
+#include <vector>
 namespace NSNAME
 {
 // Helper for unique_ptr with OpenSSL types
@@ -35,8 +41,172 @@ BIOPtr makeBIOPtr(BIO* ptr)
 {
     return BIOPtr(ptr, BIO_free_all);
 }
-using EVP_PKEYPtr = openssl_ptr<EVP_PKEY, EVP_PKEY_free>;
+class Tpm2
+{
+    OSSL_LIB_CTX* libCtx{nullptr};
+    void* tpmProviderHandle{nullptr};
 
+    Tpm2()
+    {
+        libCtx = OSSL_LIB_CTX_new();
+        tpmInit();
+    }
+
+  public:
+    ~Tpm2()
+    {
+        if (tpmProviderHandle)
+        {
+            dlclose(tpmProviderHandle);
+        }
+    }
+
+    void tpmInit()
+    {
+        // const char* libPath = "/usr/lib/aarch64-linux-gnu/engines-3/tpm2.so";
+
+        // tpmProviderHandle = dlopen(libPath, RTLD_GLOBAL | RTLD_NOW);
+        // if (tpmProviderHandle == NULL)
+        // {
+        //     LOG_ERROR("Failed to load tpm2.so module: {}", dlerror());
+        //     return;
+        // }
+
+        // OSSL_provider_init_fn* fun = (OSSL_provider_init_fn*)dlsym(
+        //     tpmProviderHandle, "OSSL_provider_init_tpm2");
+
+        // if (fun == NULL)
+        // {
+        //     LOG_ERROR(
+        //         "Failed to find OSSL_provider_init_tpm2 in tpm2.so module:
+        //         {}", dlerror());
+        //     dlclose(tpmProviderHandle);
+        //     tpmProviderHandle = nullptr;
+        //     return;
+        // }
+
+        // fun(libCtx, NULL, NULL);
+        OSSL_PROVIDER* tpmProvider = OSSL_PROVIDER_load(libCtx, "tpm2");
+
+        if (tpmProvider)
+        {
+            // OSSL_PROVIDER_self_test typically runs on load if configured
+            // right This manual call is fine, but potentially redundant.
+            auto r = OSSL_PROVIDER_self_test(tpmProvider);
+            if (r != 1)
+            {
+                LOG_ERROR("TPM2 provider self test failed");
+                return;
+            }
+            return;
+        }
+
+        LOG_ERROR("Failed to load tpm2 provider");
+    }
+
+    EVP_PKEYPtr retrievePrivateKeyFromTpm(const std::string& tpmUri)
+    {
+        OSSL_STORE_CTX* storeCtx = nullptr;
+        OSSL_STORE_INFO* info = nullptr;
+        const char* propq = "?provider=tpm2";
+        EVP_PKEY* pkey = nullptr;
+
+        storeCtx = OSSL_STORE_open_ex(tpmUri.c_str(), libCtx, propq, NULL, NULL,
+                                      NULL, NULL, NULL);
+
+        if (!storeCtx)
+        {
+            LOG_ERROR("Failed to open store context for URI: {}", tpmUri);
+            return makeEVPPKeyPtr(nullptr);
+        }
+
+        // Iterate until a key is found or end of store reached
+        while (!OSSL_STORE_eof(storeCtx) && pkey == nullptr)
+        {
+            info = OSSL_STORE_load(storeCtx);
+
+            if (info == nullptr)
+            {
+                if (OSSL_STORE_error(storeCtx))
+                {
+                    LOG_ERROR("Error during OSSL_STORE_load (PrivateKey).");
+                }
+                continue;
+            }
+
+            if (OSSL_STORE_INFO_get_type(info) == OSSL_STORE_INFO_PKEY)
+            {
+                pkey = OSSL_STORE_INFO_get1_PKEY(info);
+                LOG_INFO("Private key retrieved from TPM.");
+            }
+
+            OSSL_STORE_INFO_free(info);
+        }
+
+        OSSL_STORE_close(storeCtx);
+
+        if (pkey == nullptr)
+        {
+            LOG_ERROR("No private key found at URI: {}", tpmUri);
+        }
+
+        return makeEVPPKeyPtr(pkey); // Using assumed smart pointer constructor
+    }
+    X509Ptr retrieveCertificateFromTpm(const std::string& tpmUri)
+    {
+        OSSL_STORE_CTX* storeCtx = nullptr;
+        OSSL_STORE_INFO* info = nullptr;
+        const char* propq = "?provider=tpm2";
+        X509* cert = nullptr;
+
+        storeCtx = OSSL_STORE_open_ex(tpmUri.c_str(), libCtx, propq, NULL, NULL,
+                                      NULL, NULL, NULL);
+
+        if (!storeCtx)
+        {
+            LOG_ERROR("Failed to open store context for URI: {}", tpmUri);
+            return makeX509Ptr(nullptr);
+        }
+
+        // Iterate until a certificate is found or end of store reached
+        while (!OSSL_STORE_eof(storeCtx) && cert == nullptr)
+        {
+            info = OSSL_STORE_load(storeCtx);
+
+            if (info == nullptr)
+            {
+                if (OSSL_STORE_error(storeCtx))
+                {
+                    LOG_ERROR("Error during OSSL_STORE_load (Certificate).");
+                }
+                continue;
+            }
+
+            if (OSSL_STORE_INFO_get_type(info) == OSSL_STORE_INFO_CERT)
+            {
+                cert = OSSL_STORE_INFO_get1_CERT(info);
+                LOG_INFO("Certificate retrieved from TPM.");
+            }
+
+            OSSL_STORE_INFO_free(info);
+        }
+
+        OSSL_STORE_close(storeCtx);
+
+        if (cert == nullptr)
+        {
+            LOG_ERROR("No certificate found at URI: {}", tpmUri);
+        }
+
+        return makeX509Ptr(cert); // Using assumed smart pointer constructor
+    }
+
+    static Tpm2& getInstance()
+    {
+        static Tpm2 instance;
+        return instance;
+    }
+};
 inline void printLastError()
 {
     unsigned long err = ERR_get_error();

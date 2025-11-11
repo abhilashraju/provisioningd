@@ -269,7 +269,16 @@ net::awaitable<void> startSpdm(
         LOG_ERROR("SPDM provisioning failed {}", e.what());
     }
 }
-
+nlohmann::json loadConfig(const std::string& configPath)
+{
+    std::ifstream confFile(configPath);
+    if (confFile)
+    {
+        return nlohmann::json::parse(confFile);
+    }
+    return nlohmann::json{
+        {"port", 8090}, {"cert_root", "/tmp/1222/"}, {"interface_id", "eth1"}};
+}
 int main(int argc, const char* argv[])
 {
     try
@@ -278,8 +287,8 @@ int main(int argc, const char* argv[])
         logger.setLogLevel(LogLevel::DEBUG);
         Tpm2::getInstance(); // Initialize TPM2 provider
         net::io_context io_context;
-        std::ifstream confFile("/var/provisioning/provisioning.conf");
-        auto confJson = nlohmann::json::parse(confFile);
+
+        auto confJson = loadConfig("/var/provisioning/provisioning.conf");
         auto port = confJson.value("port", 8090);
         cert_root = confJson.value("cert_root", std::string{"/tmp/1222/"});
         auto iface = confJson.value("interface_id", std::string{"eth2"});

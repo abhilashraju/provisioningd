@@ -204,7 +204,28 @@ net::awaitable<void> updateNeighbourDetails(
                                                    responderInfo, spdmHandler);
     intialiseSpdmHandler(spdmHandler, *spdmDevice, spdmResponder);
 }
-
+nlohmann::json loadConfig(const std::string& configPath)
+{
+    std::ifstream confFile(configPath);
+    if (confFile)
+    {
+        return nlohmann::json::parse(confFile);
+    }
+    return nlohmann::json{
+        {"server-cert", std::string{"/etc/ssl/certs/https/server.mtls.pem"}},
+        {"server-pkey", std::string{"/etc/ssl/private/server.mtls.key"}},
+        {"client-cert", std::string{"/etc/ssl/certs/https/client.mtls.pem"}},
+        {"client-pkey", std::string{"/etc/ssl/private/client.mtls.key"}},
+        {"sign-privkey", std::string{"/etc/ssl/private/signing.key"}},
+        {"sign-cert", std::string{"/etc/ssl/certs/https/signing.pem"}},
+        {"verify-cert", std::string{"/etc/ssl/certs/bmc.ca.pem"}},
+        {"self-signed", true},
+        {"port", std::string{"8091"}},
+        {"ip", std::string{"0.0.0.0"}},
+        {"interface_id", std::string{"eth1"}},
+        {"exchange_prefix", std::string{"/"}},
+        {"resources", nlohmann::json::array()}};
+}
 int main(int argc, const char* argv[])
 {
     auto [conf] = getArgs(parseCommandline(argc, argv), "--conf,-c");
@@ -217,7 +238,7 @@ int main(int argc, const char* argv[])
     }
     try
     {
-        auto json = nlohmann::json::parse(std::ifstream(conf.value().data()));
+        auto json = loadConfig(conf.value().data());
 
         auto servercert = json.value(
             "server-cert", std::string{"/etc/ssl/certs/https/server.mtls.pem"});

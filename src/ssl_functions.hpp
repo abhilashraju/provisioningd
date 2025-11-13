@@ -54,6 +54,8 @@ std::optional<ssl::context> getClientContext()
                                          boost::asio::ssl::context::pem);
         return std::optional<ssl::context>(std::move(ssl_context));
     }
+    LOG_ERROR("Client SSL context files are missing searched paths: {}, {}, {}",
+              ENTITY_CLIENT_CERT_PATH(), CLIENT_PKEY_PATH(), trustStorePath());
     return std::nullopt;
 }
 std::optional<ssl::context> getServerContext()

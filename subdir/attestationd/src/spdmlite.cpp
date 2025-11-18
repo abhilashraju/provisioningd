@@ -258,7 +258,7 @@ int main(int argc, const char* argv[])
         auto port = json.value("port", std::string{});
         auto myip = json.value("ip", std::string{"0.0.0.0"});
         auto iface = json.value("interface_id", std::string{"eth2"});
-        prefix = json.value("exchange_prefix", std::string{});
+        prefix = json.value("exchange_prefix", std::string{"/"});
         std::vector<std::string> resources =
             json.value("resources", std::vector<std::string>{});
         auto maxConnections = 1;

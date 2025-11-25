@@ -78,7 +78,7 @@ struct DbusWatcher
         co_return;
     }
     net::awaitable<std::optional<PropType>> watchOnce(
-        std::chrono::seconds timeout = 1s)
+        std::chrono::seconds timeout = std::chrono::seconds(1))
     {
         auto h = makeWatchHandler();
         net::steady_timer timer(conn->get_io_context());

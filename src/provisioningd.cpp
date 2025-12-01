@@ -290,7 +290,7 @@ int main(int argc, const char* argv[])
 
         auto confJson = loadConfig("/var/provisioning/provisioning.conf");
         auto port = confJson.value("port", 8090);
-        cert_root = confJson.value("cert_root", std::string{"/tmp/1222/"});
+        cert_root = confJson.value("cert_root", std::string{"/"});
         auto iface = confJson.value("interface_id", std::string{"eth2"});
 
         auto conn = std::make_shared<sdbusplus::asio::connection>(io_context);

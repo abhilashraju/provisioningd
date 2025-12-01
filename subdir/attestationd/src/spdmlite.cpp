@@ -5,6 +5,7 @@
 #include "dbusproperty_watcher.hpp"
 #include "eventmethods.hpp"
 #include "eventqueue.hpp"
+#include "lldp_neighbour_handlers.hpp"
 #include "logger.hpp"
 #include "root_certs.hpp"
 #include "sdbus_calls.hpp"
@@ -19,12 +20,9 @@
 #include <nlohmann/json.hpp>
 
 #include <csignal>
-static constexpr auto LLDP_SVC = "xyz.openbmc_project.LLDP";
+
 static constexpr auto LLDP_PATH = "/xyz/openbmc_project/network/lldp/{}";
-static constexpr auto LLDP_INTF = "xyz.openbmc_project.Network.LLDP.TLVs";
 static constexpr auto LLDP_PROP = "ManagementAddressIPv4";
-static constexpr auto LLDP_REC_PATH =
-    "/xyz/openbmc_project/network/lldp/{}/receive";
 std::string prefix;
 ssl::context loadServerContext(const std::string& servercert,
                                const std::string& privKey,
@@ -125,84 +123,25 @@ void intialiseSpdmHandler(SpdmHandler& spdmHandler,
         });
 }
 
-net::awaitable<void> onNeighbhorFound(
+auto createNeighbourHandler(
     net::io_context& io_context,
     std::shared_ptr<sdbusplus::asio::connection> conn,
     sdbusplus::asio::object_server& dbusServer, SpdmHandler& spdmHandler,
     SpdmResponderIface& spdmResponder,
-    std::shared_ptr<SpdmDeviceIface>& spdmDevice, const std::string& remotePort,
-    const boost::system::error_code& ec, std::optional<sdbusplus::message_t> m)
+    std::shared_ptr<SpdmDeviceIface>& spdmDevice, const std::string& remotePort)
 {
-    if (!m)
-    {
-        LOG_ERROR("Failed to get LLDP interface signal change");
+    return [&io_context, conn, &dbusServer, &spdmHandler, &spdmResponder,
+            &spdmDevice,
+            remotePort](const std::string& address,
+                        const std::string& name) -> net::awaitable<void> {
+        LOG_INFO("Neighbour LLDP Address : {} Name : {} ", address, name);
+        SpdmDeviceIface::ResponderInfo responderInfo{name, address, remotePort};
+        spdmDevice.reset();
+        spdmDevice = std::make_shared<SpdmDeviceIface>(
+            conn, dbusServer, responderInfo, spdmHandler);
+        intialiseSpdmHandler(spdmHandler, *spdmDevice, spdmResponder);
         co_return;
-    }
-    InterfaceMap interfaces;
-    sdbusplus::message::object_path objPath;
-    m->read(objPath, interfaces);
-    auto it = interfaces.find(LLDP_INTF);
-    if (it == interfaces.end())
-    {
-        LOG_ERROR("Failed to find LLDP interface in signal");
-        co_return;
-    }
-
-    auto propMap = it->second;
-    auto [ec1, address, name] = getPropertiesFromMap<std::string, std::string>(
-        propMap, "ManagementAddressIPv4", "SystemName");
-    if (ec1)
-    {
-        LOG_ERROR("Failed to get LLDP properties: {}", ec.message());
-        co_return;
-    }
-    if (address.empty() || name.empty())
-    {
-        LOG_ERROR("LLDP Address or Name is empty");
-        co_return;
-    }
-
-    LOG_INFO("Neighbour LLDP Address : {} Name : {} ", address, name);
-    SpdmDeviceIface::ResponderInfo responderInfo{name, address, remotePort};
-    spdmDevice.reset();
-    spdmDevice = std::make_shared<SpdmDeviceIface>(conn, dbusServer,
-                                                   responderInfo, spdmHandler);
-    intialiseSpdmHandler(spdmHandler, *spdmDevice, spdmResponder);
-    co_return;
-}
-net::awaitable<void> updateNeighbourDetails(
-    net::io_context& io_context,
-    std::shared_ptr<sdbusplus::asio::connection> conn,
-    sdbusplus::asio::object_server& dbusServer, SpdmHandler& spdmHandler,
-    SpdmResponderIface& spdmResponder,
-    std::shared_ptr<SpdmDeviceIface>& spdmDevice, const std::string& remotePort,
-    const std::string& iface)
-
-{
-    auto [ec, properties] = co_await getAllProperties(
-        *conn, LLDP_SVC, std::format(LLDP_REC_PATH, iface), LLDP_INTF);
-    if (ec)
-    {
-        LOG_ERROR("Failed to get LLDP property: {}", ec.message());
-        co_return;
-    }
-    auto [ec1, address, name] = getPropertiesFromMap<std::string, std::string>(
-        properties, "ManagementAddressIPv4", "SystemName");
-    if (ec1)
-    {
-        LOG_ERROR("Failed to get LLDP properties: {}", ec.message());
-        co_return;
-    }
-    if (address.empty() || name.empty())
-    {
-        LOG_ERROR("LLDP Address or Name is empty");
-        co_return;
-    }
-    LOG_INFO("LLDP ManagementAddressIPv4: {} Name: {}", address, name);
-    SpdmDeviceIface::ResponderInfo responderInfo{name, address, remotePort};
-    spdmDevice = std::make_shared<SpdmDeviceIface>(conn, dbusServer,
-                                                   responderInfo, spdmHandler);
-    intialiseSpdmHandler(spdmHandler, *spdmDevice, spdmResponder);
+    };
 }
 nlohmann::json loadConfig(const std::string& configPath)
 {
@@ -302,21 +241,19 @@ int main(int argc, const char* argv[])
         sdbusplus::asio::object_server dbusServer(conn);
         std::shared_ptr<SpdmDeviceIface> spdmDevice;
         SpdmResponderIface spdmResponder(conn, dbusServer, "responder1");
+
+        auto neighbourHandler =
+            createNeighbourHandler(io_context, conn, dbusServer, spdmHandler,
+                                   spdmResponder, spdmDevice, port);
+
         DbusSignalWatcher<sdbusplus::message_t>::watch(
-            io_context, conn,
-            std::bind_front(onNeighbhorFound, std::ref(io_context), conn,
-                            std::ref(dbusServer), std::ref(spdmHandler),
-                            std::ref(spdmResponder), std::ref(spdmDevice),
-                            port),
+            io_context, conn, makeNeighbourDiscoveryHandler(neighbourHandler),
             sdbusplus::bus::match::rules::interfacesAddedAtPath(
                 std::format(LLDP_REC_PATH, iface)));
-        net::co_spawn(
-            io_context,
-            std::bind_front(updateNeighbourDetails, std::ref(io_context), conn,
-                            std::ref(dbusServer), std::ref(spdmHandler),
-                            std::ref(spdmResponder), std::ref(spdmDevice), port,
-                            iface),
-            net::detached);
+
+        net::co_spawn(io_context,
+                      makeNeighbourUpdateHandler(conn, iface, neighbourHandler),
+                      net::detached);
         conn->request_name(SpdmDeviceIface::busName);
         io_context.run();
     }

@@ -8,12 +8,12 @@
 
 #include <ranges>
 using namespace NSNAME;
-static constexpr auto SPDM_BEGIN_REQ = "SPDM_BEGIN_REQ";
-static constexpr auto SPDM_BEGIN_READY = "SPDM_BEGIN_READY";
+static constexpr auto ATTESTATION_BEGIN_REQ = "ATTESTATION_BEGIN_REQ";
+static constexpr auto ATTESTATION_BEGIN_READY = "ATTESTATION_BEGIN_READY";
 static constexpr auto MEASUREMENT_REQ_EVENT = "MEASUREMENT_REQ_EVENT";
 static constexpr auto MEASUREMENT_RES_EVENT = "MEASUREMENT_RES_EVENT";
 static constexpr auto MEASUREMENT_DONE_EVENT = "MEASUREMENT_DONE_EVENT";
-struct SpdmHandler
+struct AttestationHandler
 {
     MeasurementTaker measurementTaker;
     MeasurementVerifier measurementVerifier;
@@ -21,32 +21,36 @@ struct SpdmHandler
     net::io_context& ioContext;
     std::vector<std::string> toMeasure;
     using MeasurementResult = std::map<std::string, bool>;
-    using SPDM_FINISH_HANDLER = std::function<net::awaitable<void>(bool, bool)>;
-    SPDM_FINISH_HANDLER onSpdmFinish;
-    SpdmHandler(MeasurementTaker mesTaker, MeasurementVerifier mesVerifier,
-                EventQueue& eventQueue, net::io_context& ioContext) :
+    using ATTESTATION_FINISH_HANDLER =
+        std::function<net::awaitable<void>(bool, bool)>;
+    ATTESTATION_FINISH_HANDLER onAttestationFinish;
+    AttestationHandler(MeasurementTaker mesTaker,
+                       MeasurementVerifier mesVerifier, EventQueue& eventQueue,
+                       net::io_context& ioContext) :
         measurementTaker(std::move(mesTaker)),
         measurementVerifier(std::move(mesVerifier)), eventQueue(eventQueue),
         ioContext(ioContext)
     {
         eventQueue.addEventProvider(
-            SPDM_BEGIN_REQ,
-            std::bind_front(&SpdmHandler::spdmBeginHandler, this));
+            ATTESTATION_BEGIN_REQ,
+            std::bind_front(&AttestationHandler::attestationBeginHandler,
+                            this));
         eventQueue.addEventConsumer(
-            SPDM_BEGIN_REQ,
-            std::bind_front(&SpdmHandler::spdmBeginConsumer, this));
+            ATTESTATION_BEGIN_REQ,
+            std::bind_front(&AttestationHandler::attestationBeginConsumer,
+                            this));
     }
 
-    void setSpdmFinishHandler(SPDM_FINISH_HANDLER handler)
+    void setAttestationFinishHandler(ATTESTATION_FINISH_HANDLER handler)
     {
-        onSpdmFinish = std::move(handler);
+        onAttestationFinish = std::move(handler);
     }
     net::awaitable<void> finish(bool status, bool responder)
     {
-        LOG_INFO("SPDM Handshake finished with status: {}", status);
-        if (onSpdmFinish)
+        LOG_INFO("Attestation Handshake finished with status: {}", status);
+        if (onAttestationFinish)
         {
-            co_await onSpdmFinish(status, responder);
+            co_await onAttestationFinish(status, responder);
         }
         co_return;
     }
@@ -54,28 +58,30 @@ struct SpdmHandler
     {
         eventQueue.setQueEndPoint(ip, port);
     }
-    SpdmHandler(const SpdmHandler&) = delete;
-    SpdmHandler& operator=(const SpdmHandler&) = delete;
-    SpdmHandler(SpdmHandler&& o) = delete;
-    SpdmHandler& addToMeasure(const std::string& exePath)
+    AttestationHandler(const AttestationHandler&) = delete;
+    AttestationHandler& operator=(const AttestationHandler&) = delete;
+    AttestationHandler(AttestationHandler&& o) = delete;
+    AttestationHandler& addToMeasure(const std::string& exePath)
     {
         toMeasure.push_back(exePath);
         return *this;
     }
 
-    net::awaitable<boost::system::error_code> spdmBeginConsumer(
+    net::awaitable<boost::system::error_code> attestationBeginConsumer(
         Streamer streamer, const std::string& eventReplay)
     {
         LOG_DEBUG("Received event: {}", eventReplay);
         auto [id, body] = parseEvent(eventReplay);
-        if (id == SPDM_BEGIN_REQ)
+        if (id == ATTESTATION_BEGIN_REQ)
         {
             auto [ec, size] = co_await sendHeader(
-                streamer, makeEvent(SPDM_BEGIN_READY, "SPDM Begin Ready"));
+                streamer,
+                makeEvent(ATTESTATION_BEGIN_READY, "Attestation Begin Ready"));
             if (ec)
             {
                 co_await finish(false, true);
-                LOG_ERROR("Failed to send SPDM Begin Ready: {}", ec.message());
+                LOG_ERROR("Failed to send Attestation Begin Ready: {}",
+                          ec.message());
                 co_return ec;
             }
             std::string measreq;
@@ -94,7 +100,7 @@ struct SpdmHandler
                 LOG_ERROR("Failed to make  measurement response");
                 co_return boost::system::error_code{};
             }
-            LOG_INFO("SPDM measurement completed successfully");
+            LOG_INFO("Attestation measurement completed successfully");
             LOG_INFO("Waiting for certificate exchange");
             auto exchanged = co_await waitForCertExchange(streamer);
             if (!exchanged)
@@ -105,12 +111,12 @@ struct SpdmHandler
             co_return boost::system::error_code{};
         }
     }
-    net::awaitable<boost::system::error_code> spdmBeginHandler(
+    net::awaitable<boost::system::error_code> attestationBeginHandler(
         Streamer streamer, const std::string& event)
     {
         LOG_DEBUG("Received event: {}", event);
         auto [id, body] = parseEvent(event);
-        if (id == SPDM_BEGIN_READY)
+        if (id == ATTESTATION_BEGIN_READY)
         {
             auto success = co_await startMeasurement(streamer);
             if (success)
@@ -126,7 +132,7 @@ struct SpdmHandler
             co_await finish(false, false);
             co_return boost::system::error_code{};
         }
-        LOG_ERROR("Failed to start SPDM measurement: {}", event);
+        LOG_ERROR("Failed to start Attestation measurement: {}", event);
         co_return boost::system::error_code{};
     }
     net::awaitable<bool> processMeasurementRequest(
@@ -264,10 +270,10 @@ struct SpdmHandler
     }
     void startHandshake()
     {
-        LOG_DEBUG("Starting SPDM handshake");
+        LOG_DEBUG("Starting Attestation handshake");
         nlohmann::json jsonBody;
-        jsonBody["bin"] = "spdm_handshake";
-        auto replay = makeEvent(SPDM_BEGIN_REQ, jsonBody.dump());
+        jsonBody["bin"] = "attestation_handshake";
+        auto replay = makeEvent(ATTESTATION_BEGIN_REQ, jsonBody.dump());
         eventQueue.addEvent(replay);
     }
 };

@@ -31,7 +31,6 @@ static constexpr auto LLDP_INTF = "xyz.openbmc_project.Network.LLDP.TLVs";
 static constexpr auto LLDP_PROP = "ManagementAddressIPv4";
 static constexpr auto LLDP_REC_PATH =
     "/xyz/openbmc_project/network/lldp/{}/receive";
-
 using DbusObjectPath = std::string;
 using DbusInterface = std::string;
 using PropertyValue = std::string;

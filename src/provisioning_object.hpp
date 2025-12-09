@@ -1,6 +1,7 @@
 #pragma once
 #include "sdbus_calls.hpp"
 
+#include <xyz/openbmc_project/Common/error.hpp>
 #include <xyz/openbmc_project/Provisioning/Provisioning/server.hpp>
 using namespace reactor;
 
@@ -8,6 +9,15 @@ using namespace sdbusplus::server::xyz::openbmc_project::provisioning;
 using ProvisioningIface =
     sdbusplus::server::xyz::openbmc_project::provisioning::Provisioning;
 using Ifaces = sdbusplus::server::object_t<ProvisioningIface>;
+using InsufficientPermission =
+    sdbusplus::xyz::openbmc_project::Common::Error::InsufficientPermission;
+using InternalFailure =
+    sdbusplus::xyz::openbmc_project::Common::Error::InternalFailure;
+using InvalidArgument =
+    sdbusplus::xyz::openbmc_project::Common::Error::InvalidArgument;
+
+using UnsupportedRequest =
+    sdbusplus::xyz::openbmc_project::Common::Error::UnsupportedRequest;
 struct ProvisioningController : Ifaces
 {
     net::io_context& ioContext;
@@ -37,6 +47,16 @@ struct ProvisioningController : Ifaces
     {}
     void provisionPeer(std::string deviceId) override
     {
+        if (deviceId == "self")
+        {
+            setProvisioned(true);
+            return;
+        }
+        if (!provisioned())
+        {
+            LOG_ERROR("This BMC is not provisioned");
+            throw InsufficientPermission();
+        }
         provisionHandler(deviceId);
     }
     void setProvisionHandler(PROVISIONING_HANDLER handler)

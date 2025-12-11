@@ -18,6 +18,8 @@ using InvalidArgument =
 
 using UnsupportedRequest =
     sdbusplus::xyz::openbmc_project::Common::Error::UnsupportedRequest;
+using NotAllowed = sdbusplus::xyz::openbmc_project::Common::Error::NotAllowed;
+
 struct ProvisioningController : Ifaces
 {
     net::io_context& ioContext;
@@ -55,7 +57,7 @@ struct ProvisioningController : Ifaces
         if (!provisioned())
         {
             LOG_ERROR("This BMC is not provisioned");
-            throw InsufficientPermission();
+            throw NotAllowed();
         }
         provisionHandler(deviceId);
     }

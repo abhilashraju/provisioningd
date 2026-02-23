@@ -131,30 +131,33 @@ net::awaitable<void> tryConnect(net::io_context& io_context,
                                 const std::string& ip, short port,
                                 ProvisioningController& controller)
 {
+    auto dir=ProvisioningController::ConnectionDirection::outgoing;
     controller.setPeerConnected(
-        ProvisioningIface::PeerConnectionStatus::InProgress);
+        ProvisioningIface::PeerConnectionStatus::InProgress,dir);
     LOG_DEBUG("Trying peer connection");
     auto sslCtx = getClientContext();
+    
     if (!sslCtx)
     {
         LOG_ERROR("ssl context is not available");
         controller.setPeerConnected(
-            ProvisioningIface::PeerConnectionStatus::NotConnected);
+            ProvisioningIface::PeerConnectionStatus::NotConnected,dir);
         co_return;
     }
     TcpClient client(io_context.get_executor(), *sslCtx);
     auto ec = co_await connect(client, ip, port);
+    
     if (ec)
     {
         controller.setPeerConnected(
-            ProvisioningIface::PeerConnectionStatus::NotConnected);
+            ProvisioningIface::PeerConnectionStatus::NotConnected,dir);
         co_return;
     }
     controller.setPeerConnected(
-        ProvisioningIface::PeerConnectionStatus::Connected);
+        ProvisioningIface::PeerConnectionStatus::Connected,dir);
     co_await monitorBmc(io_context, client);
     controller.setPeerConnected(
-        ProvisioningIface::PeerConnectionStatus::NotConnected);
+        ProvisioningIface::PeerConnectionStatus::NotConnected,dir);
 }
 
 std::shared_ptr<BmcResponder> makeBmcResponder(
@@ -167,7 +170,7 @@ std::shared_ptr<BmcResponder> makeBmcResponder(
     bmcResponder->onConnectionChange([&controller](bool connected) {
         controller.setPeerConnected(
             connected ? ProvisioningIface::PeerConnectionStatus::Connected
-                      : ProvisioningIface::PeerConnectionStatus::NotConnected);
+                      : ProvisioningIface::PeerConnectionStatus::NotConnected,ProvisioningController::ConnectionDirection::incoming);
     });
     return bmcResponder;
 }

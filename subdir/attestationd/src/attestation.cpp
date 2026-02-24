@@ -252,9 +252,13 @@ int main(int argc, const char* argv[])
         auto neighbourHandler = createNeighbourHandler(
             io_context, conn, dbusServer, attestationHandler,
             attestationResponder, attestationDevice, std::format("{}",port));
-
+        auto fallbackHandler = [&io_context,conn,iface,neighbourHandler](){
+            net::co_spawn(io_context,
+                      makeNeighbourUpdateHandler(conn, iface, neighbourHandler),
+                      net::detached);
+        };
         DbusSignalWatcher<sdbusplus::message_t>::watch(
-            io_context, conn, makeNeighbourDiscoveryHandler(neighbourHandler),
+            io_context, conn, makeNeighbourDiscoveryHandler(neighbourHandler,std::move(fallbackHandler)),
             sdbusplus::bus::match::rules::interfacesAddedAtPath(
                 std::format(LLDP_REC_PATH, iface)));
 

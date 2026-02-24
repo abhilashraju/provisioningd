@@ -34,9 +34,10 @@ static constexpr auto LLDP_INTF = "xyz.openbmc_project.Network.LLDP.TLVs";
  * @return A coroutine handler for D-Bus signal processing
  */
 template <typename Handler>
-auto makeNeighbourDiscoveryHandler(Handler handler)
+auto makeNeighbourDiscoveryHandler(Handler handler,
+                                   std::function<void()> fallback = {})
 {
-    return [handler = std::move(handler)](
+    return [handler = std::move(handler), fallback = std::move(fallback)](
                const boost::system::error_code& ec,
                std::optional<sdbusplus::message_t> m) -> net::awaitable<void> {
         if (!m)
@@ -66,6 +67,11 @@ auto makeNeighbourDiscoveryHandler(Handler handler)
         if (address.empty() || name.empty())
         {
             LOG_ERROR("LLDP Address or Name is empty");
+            if (fallback)
+            {
+                LOG_DEBUG("Calling fallback for fetching Address");
+                fallback();
+            }
             co_return;
         }
 

@@ -9,7 +9,7 @@
 namespace NSNAME
 {
 static constexpr auto EVENTQUEFILE = "/var/lib/coroserver/eventqueue2.dat";
-static constexpr auto TIMETOLIVE = 60;
+static constexpr auto TIMETOLIVE = 6;
 namespace fs = std::filesystem;
 struct EventQueue
 {

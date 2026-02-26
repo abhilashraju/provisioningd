@@ -2,6 +2,7 @@
 #include "cert_generator.hpp"
 #include "command_line_parser.hpp"
 #include "dbusproperty_watcher.hpp"
+#include "lldp_neighbour_handlers.hpp"
 #include "provisioning_object.hpp"
 #include "ssl_functions.hpp"
 #include "tcp_client.hpp"
@@ -10,6 +11,7 @@
 #include <unistd.h>
 
 #include <nlohmann/json.hpp>
+#include <sdbusplus/bus/match.hpp>
 
 #include <fstream>
 #include <iostream>
@@ -25,17 +27,13 @@ static constexpr auto ATTESTATION_RES_INTF =
 static constexpr auto ATTESTATION_PROP = "Status";
 static constexpr auto ATTESTATION_REQ_SIGNAL = "Attested";
 static constexpr auto ATTESTATION_RES_SIGNAL = "Attested";
-static constexpr auto LLDP_SVC = "xyz.openbmc_project.LLDP";
-static constexpr auto LLDP_PATH = "/xyz/openbmc_project/network/lldp/{}";
-static constexpr auto LLDP_INTF = "xyz.openbmc_project.Network.LLDP.TLVs";
 static constexpr auto LLDP_PROP = "ManagementAddressIPv4";
-static constexpr auto LLDP_REC_PATH =
-    "/xyz/openbmc_project/network/lldp/{}/receive";
 using DbusObjectPath = std::string;
 using DbusInterface = std::string;
 using PropertyValue = std::string;
 using DbusService = std::string;
-
+static int gRetryTime = 30;
+static int gRetryCount = 3;
 net::awaitable<void> waitFor(net::io_context& io_context,
                              std::chrono::seconds duration)
 {
@@ -96,7 +94,7 @@ net::awaitable<bool> monitorBmc(net::io_context& io_context, TcpClient& client,
 net::awaitable<boost::system::error_code> connect(
     TcpClient& client, const std::string& ip, short port)
 {
-    int retryCount = 3;
+    int retryCount = gRetryCount;
     while (retryCount--)
     {
         auto ec = co_await client.connect(ip, std::to_string(port));
@@ -119,7 +117,7 @@ net::awaitable<boost::system::error_code> connect(
             // retry after delay
             boost::asio::steady_timer timer(
                 co_await boost::asio::this_coro::executor);
-            timer.expires_after(std::chrono::seconds(5));
+            timer.expires_after(std::chrono::seconds(gRetryTime));
             co_await timer.async_wait(net::use_awaitable);
             continue;
         }
@@ -131,33 +129,33 @@ net::awaitable<void> tryConnect(net::io_context& io_context,
                                 const std::string& ip, short port,
                                 ProvisioningController& controller)
 {
-    auto dir=ProvisioningController::ConnectionDirection::outgoing;
+    auto dir = ProvisioningController::ConnectionDirection::outgoing;
     controller.setPeerConnected(
-        ProvisioningIface::PeerConnectionStatus::InProgress,dir);
+        ProvisioningIface::PeerConnectionStatus::InProgress, dir);
     LOG_DEBUG("Trying peer connection");
     auto sslCtx = getClientContext();
-    
+
     if (!sslCtx)
     {
         LOG_ERROR("ssl context is not available");
         controller.setPeerConnected(
-            ProvisioningIface::PeerConnectionStatus::NotConnected,dir);
+            ProvisioningIface::PeerConnectionStatus::NotConnected, dir);
         co_return;
     }
     TcpClient client(io_context.get_executor(), *sslCtx);
     auto ec = co_await connect(client, ip, port);
-    
+
     if (ec)
     {
         controller.setPeerConnected(
-            ProvisioningIface::PeerConnectionStatus::NotConnected,dir);
+            ProvisioningIface::PeerConnectionStatus::NotConnected, dir);
         co_return;
     }
     controller.setPeerConnected(
-        ProvisioningIface::PeerConnectionStatus::Connected,dir);
+        ProvisioningIface::PeerConnectionStatus::Connected, dir);
     co_await monitorBmc(io_context, client);
     controller.setPeerConnected(
-        ProvisioningIface::PeerConnectionStatus::NotConnected,dir);
+        ProvisioningIface::PeerConnectionStatus::NotConnected, dir);
 }
 
 std::shared_ptr<BmcResponder> makeBmcResponder(
@@ -170,40 +168,23 @@ std::shared_ptr<BmcResponder> makeBmcResponder(
     bmcResponder->onConnectionChange([&controller](bool connected) {
         controller.setPeerConnected(
             connected ? ProvisioningIface::PeerConnectionStatus::Connected
-                      : ProvisioningIface::PeerConnectionStatus::NotConnected,ProvisioningController::ConnectionDirection::incoming);
+                      : ProvisioningIface::PeerConnectionStatus::NotConnected,
+            ProvisioningController::ConnectionDirection::incoming);
     });
     return bmcResponder;
 }
-net::awaitable<void> tryConnectIfNeighbourFound(
-    net::io_context& io_context,
-    std::shared_ptr<sdbusplus::asio::connection> conn,
-    ProvisioningController& controller, short rport, const std::string& iface)
-{
-    auto propVal = co_await getRemoteIp(*conn, iface);
-    if (propVal)
-    {
-        LOG_INFO("LLDP ManagementAddressIPv4: {}", *propVal);
-        co_await tryConnect(io_context, *propVal, rport, controller);
-    }
-    co_return;
-}
-net::awaitable<void> onNeighbhorFound(
+net::awaitable<void> onNeighbourFound(
     net::io_context& io_context, ProvisioningController& controller,
-    short rport, const boost::system::error_code& ec,
-    std::optional<std::string> ip)
+    short rport, const std::string& address, const std::string& name)
 {
-    if (ec)
-    {
-        co_return;
-    }
-    LOG_INFO("LLDP Neighbour IP found: {}", *ip);
+    LOG_INFO("LLDP Neighbour IP found: {} Name: {}", address, name);
     if (controller.peerConnected() ==
         ProvisioningIface::PeerConnectionStatus::Connected)
     {
         LOG_INFO("Peer already connected, skipping connection attempt");
         co_return;
     }
-    co_await tryConnect(io_context, *ip, rport, controller);
+    co_await tryConnect(io_context, address, rport, controller);
     co_return;
 }
 net::awaitable<void> onSpdmStateChange(
@@ -298,6 +279,9 @@ int main(int argc, const char* argv[])
         cert_root = confJson.value("cert_root", std::string{"/"});
         auto iface = confJson.value("interface_id", std::string{"eth2"});
 
+        gRetryCount = confJson.value("retry_count", 3);
+        gRetryTime = confJson.value("retry_timer", 30);
+
         auto conn = std::make_shared<sdbusplus::asio::connection>(io_context);
         ProvisioningController controller(io_context, conn);
         conn->request_name(ProvisioningController::busName);
@@ -325,16 +309,28 @@ int main(int argc, const char* argv[])
             std::bind_front(onSpdmStateChange, std::ref(io_context), port,
                             std::ref(controller), std::ref(bmcResponder)),
             ATTESTATION_RES_INTF, ATTESTATION_RES_SIGNAL);
-        DbusPropertyWatcher<std::string>::watch(
+
+        auto neighbourHandler = [&io_context, &controller,
+                                 port](const std::string& address,
+                                       const std::string& name) -> net::awaitable<void> {
+            co_await onNeighbourFound(io_context, controller, port, address, name);
+        };
+
+        auto fallbackHandler = [&io_context, conn, iface, neighbourHandler]() {
+            net::co_spawn(io_context,
+                          makeNeighbourUpdateHandler(conn, iface, neighbourHandler),
+                          net::detached);
+        };
+
+        DbusSignalWatcher<sdbusplus::message_t>::watch(
             io_context, conn,
-            std::bind_front(onNeighbhorFound, std::ref(io_context),
-                            std::ref(controller), port),
-            std::format(LLDP_REC_PATH, iface), LLDP_INTF, LLDP_PROP);
+            makeNeighbourDiscoveryHandler(neighbourHandler, std::move(fallbackHandler)),
+            sdbusplus::bus::match::rules::interfacesAddedAtPath(
+                std::format(LLDP_REC_PATH, iface)));
 
         net::co_spawn(
             io_context,
-            std::bind_front(tryConnectIfNeighbourFound, std::ref(io_context),
-                            conn, std::ref(controller), port, iface),
+            makeNeighbourUpdateHandler(conn, iface, neighbourHandler),
             net::detached);
         io_context.run();
     }

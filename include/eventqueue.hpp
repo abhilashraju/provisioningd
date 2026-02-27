@@ -64,6 +64,14 @@ struct EventQueue
     {
         return taskQueue.getEndPoint();
     }
+    void setPurgeMode(bool mode)
+    {
+        taskQueue.setPurgeMode(mode);
+    }
+    bool getPurgeMode() const
+    {
+        return taskQueue.getPurgeMode();
+    }
     void addEventProvider(const std::string& eventId,
                           EventProvider eventProvider)
     {
@@ -330,4 +338,4 @@ struct EventQueue
     JsonSerializer serializer;
     uint64_t lastBarrierTime{0};
 };
-}
+} // namespace NSNAME

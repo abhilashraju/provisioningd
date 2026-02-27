@@ -86,6 +86,14 @@ class TaskQueue
     {
         return endPoint;
     }
+    void setPurgeMode(bool mode)
+    {
+        purgeMode = mode;
+    }
+    bool getPurgeMode() const
+    {
+        return purgeMode;
+    }
     void addTask(Task messageHandler, bool front = false)
     {
         bool processNow = taskHandlers.size() < maxClients;
@@ -190,6 +198,11 @@ class TaskQueue
             }
             co_return NetworkTask{takeTask(), *client};
         }
+        if (purgeMode)
+        {
+            // delete the task if connection not available
+            takeTask();
+        }
         co_return std::nullopt;
     }
 
@@ -250,7 +263,7 @@ class TaskQueue
             }
             LOG_WARNING("Failed to connect to {}:{}. Retrying {}/{}",
                         endPoint.url, endPoint.port, i + 1, maxRetryCount);
-            timer.expires_after(5s);
+            timer.expires_after(30s);
             co_await timer.async_wait(net::use_awaitable);
             i++;
         }
@@ -267,5 +280,6 @@ class TaskQueue
     int maxRetryCount{3};
     size_t maxClients{1};
     bool started{false};
+    bool purgeMode{true};
 };
-}
+} // namespace NSNAME

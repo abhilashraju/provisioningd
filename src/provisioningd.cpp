@@ -310,28 +310,31 @@ int main(int argc, const char* argv[])
                             std::ref(controller), std::ref(bmcResponder)),
             ATTESTATION_RES_INTF, ATTESTATION_RES_SIGNAL);
 
-        auto neighbourHandler = [&io_context, &controller,
-                                 port](const std::string& address,
-                                       const std::string& name) -> net::awaitable<void> {
-            co_await onNeighbourFound(io_context, controller, port, address, name);
+        auto neighbourHandler =
+            [&io_context, &controller,
+             port](const std::string& address,
+                   const std::string& name) -> net::awaitable<void> {
+            co_await onNeighbourFound(io_context, controller, port, address,
+                                      name);
         };
 
         auto fallbackHandler = [&io_context, conn, iface, neighbourHandler]() {
-            net::co_spawn(io_context,
-                          makeNeighbourUpdateHandler(conn, iface, neighbourHandler),
-                          net::detached);
+            net::co_spawn(
+                io_context,
+                makeNeighbourUpdateHandler(conn, iface, neighbourHandler),
+                net::detached);
         };
 
         DbusSignalWatcher<sdbusplus::message_t>::watch(
             io_context, conn,
-            makeNeighbourDiscoveryHandler(neighbourHandler, std::move(fallbackHandler)),
+            makeNeighbourDiscoveryHandler(neighbourHandler,
+                                          std::move(fallbackHandler)),
             sdbusplus::bus::match::rules::interfacesAddedAtPath(
                 std::format(LLDP_REC_PATH, iface)));
 
-        net::co_spawn(
-            io_context,
-            makeNeighbourUpdateHandler(conn, iface, neighbourHandler),
-            net::detached);
+        net::co_spawn(io_context,
+                      makeNeighbourUpdateHandler(conn, iface, neighbourHandler),
+                      net::detached);
         io_context.run();
     }
     catch (const std::exception& e)

@@ -26,12 +26,13 @@ struct ProvisioningController : Ifaces
     std::shared_ptr<sdbusplus::asio::connection> conn;
     enum class ConnectionDirection
     {
-        incoming=0,
+        incoming = 0,
         outgoing
     };
-   
-    std::array<PeerConnectionStatus,2> trustedConnectionState{
-        PeerConnectionStatus::NotDetermined,PeerConnectionStatus::NotDetermined};
+
+    std::array<PeerConnectionStatus, 2> trustedConnectionState{
+        PeerConnectionStatus::NotDetermined,
+        PeerConnectionStatus::NotDetermined};
     bool provState{false};
     using PROVISIONING_HANDLER = std::function<void(const std::string&)>;
     PROVISIONING_HANDLER provisionHandler;
@@ -73,7 +74,7 @@ struct ProvisioningController : Ifaces
     }
     PeerConnectionStatus peerConnected() const override
     {
-        auto state=getHighestTrustedConnectionState();
+        auto state = getHighestTrustedConnectionState();
         LOG_DEBUG("PeerConnected state {}",
                   convertPeerConnectionStatusToString(state));
         return state;
@@ -83,7 +84,7 @@ struct ProvisioningController : Ifaces
         LOG_DEBUG("Provisioned state {}", provState);
         return provState;
     }
-    void setPeerConnected(PeerConnectionStatus value,ConnectionDirection dir)
+    void setPeerConnected(PeerConnectionStatus value, ConnectionDirection dir)
     {
         LOG_DEBUG("Setting PeerConnected state {}",
                   convertPeerConnectionStatusToString(value));
@@ -104,18 +105,40 @@ struct ProvisioningController : Ifaces
      */
     PeerConnectionStatus getHighestTrustedConnectionState() const
     {
-        auto incomingState = trustedConnectionState[static_cast<size_t>(ConnectionDirection::incoming)];
-        auto outgoingState = trustedConnectionState[static_cast<size_t>(ConnectionDirection::outgoing)];
-        
+        auto incomingState = trustedConnectionState[static_cast<size_t>(
+            ConnectionDirection::incoming)];
+        auto outgoingState = trustedConnectionState[static_cast<size_t>(
+            ConnectionDirection::outgoing)];
+
         LOG_DEBUG("Incoming connection state: {}",
                   convertPeerConnectionStatusToString(incomingState));
         LOG_DEBUG("Outgoing connection state: {}",
                   convertPeerConnectionStatusToString(outgoingState));
-        
-        auto highestState = std::max(incomingState, outgoingState);
+
+        auto highestState = maxStatus(incomingState, outgoingState);
         LOG_DEBUG("Highest connection state: {}",
                   convertPeerConnectionStatusToString(highestState));
-        
+
         return highestState;
+    }
+    PeerConnectionStatus maxStatus(PeerConnectionStatus first,
+                                   PeerConnectionStatus second) const
+    {
+        if (first == PeerConnectionStatus::Connected ||
+            second == PeerConnectionStatus::Connected)
+        {
+            return PeerConnectionStatus::Connected;
+        }
+        if (first == PeerConnectionStatus::InProgress ||
+            second == PeerConnectionStatus::InProgress)
+        {
+            return PeerConnectionStatus::InProgress;
+        }
+        if (first == PeerConnectionStatus::NotConnected ||
+            second == PeerConnectionStatus::NotConnected)
+        {
+            return PeerConnectionStatus::NotConnected;
+        }
+        return PeerConnectionStatus::NotDetermined;
     }
 };

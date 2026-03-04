@@ -184,6 +184,7 @@ net::awaitable<void> onNeighbourFound(
         LOG_INFO("Peer already connected, skipping connection attempt");
         co_return;
     }
+    co_await waitFor(io_context, 15s);
     co_await tryConnect(io_context, address, rport, controller);
     co_return;
 }

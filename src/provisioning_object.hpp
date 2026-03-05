@@ -109,12 +109,12 @@ struct ProvisioningController : Ifaces
             ConnectionDirection::incoming)];
         auto outgoingState = trustedConnectionState[static_cast<size_t>(
             ConnectionDirection::outgoing)];
-
+#if 0
         LOG_DEBUG("Incoming connection state: {}",
                   convertPeerConnectionStatusToString(incomingState));
         LOG_DEBUG("Outgoing connection state: {}",
                   convertPeerConnectionStatusToString(outgoingState));
-
+#endif
         auto highestState = maxStatus(incomingState, outgoingState);
         LOG_DEBUG("Highest connection state: {}",
                   convertPeerConnectionStatusToString(highestState));

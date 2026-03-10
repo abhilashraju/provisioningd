@@ -1,0 +1,12 @@
+[Unit]
+Description=Network Monitor and Recovery Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/simple-fix-minimal.sh @CHECK_INTERVAL@
+Restart=always
+Type=simple
+
+[Install]
+WantedBy=@SYSTEMD_TARGET@

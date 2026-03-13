@@ -37,4 +37,30 @@ install_data(
     'conf/provisioning.conf',
     install_dir: '/var/provisioning/',
 )
+
+
+if (get_option('pingtest') == true)
+    # Install network monitor script
+    install_data(
+        'service/simple-fix-minimal.sh',
+        install_dir: '/usr/bin',
+        install_mode: 'rwxr-xr-x'
+    )
+    # Configure and install network monitor service
+    configure_file(
+        input: 'service/network-monitor.service.in',
+        output: 'network-monitor.service',
+        configuration: {
+            'SYSTEMD_TARGET': 'multi-user.target',
+            'CHECK_INTERVAL': '30',
+        },
+        install: true,
+        install_dir: dependency('systemd').get_variable('systemdsystemunitdir'),
+    )
+endif
 subdir('subdir')
+
+# Include tests if enabled
+if get_option('tests').enabled()
+    subdir('test')
+endif

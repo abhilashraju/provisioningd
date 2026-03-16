@@ -2,7 +2,7 @@
 Description=Provisioning D-Bus Service
 
 [Service]
-ExecStart=/usr/bin/provisioningd -c /var/provisioning/provisioning.conf
+ExecStart=/usr/bin/provisioningd -c /etc/provisioning/provisioning.conf
 Restart=always
 Type=dbus
 BusName=@DEFAULT_BUSNAME@

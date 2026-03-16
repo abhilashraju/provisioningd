@@ -268,6 +268,14 @@ nlohmann::json loadConfig(const std::string& configPath)
 }
 int main(int argc, const char* argv[])
 {
+    auto [conf] = getArgs(parseCommandline(argc, argv), "--conf,-c");
+    if (!conf)
+    {
+        LOG_ERROR(
+            "No config file provided :eg provisioningd --conf /path/to/conf");
+
+        return 1;
+    }
     try
     {
         auto& logger = getLogger();
@@ -275,7 +283,7 @@ int main(int argc, const char* argv[])
         Tpm2::getInstance(); // Initialize TPM2 provider
         net::io_context io_context;
 
-        auto confJson = loadConfig("/var/provisioning/provisioning.conf");
+        auto confJson = loadConfig(conf.value().data());
         auto port = confJson.value("port", 8090);
         cert_root = confJson.value("cert_root", std::string{"/"});
         auto iface = confJson.value("interface_id", std::string{"eth2"});

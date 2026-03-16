@@ -139,8 +139,8 @@ auto createNeighbourHandler(
         LOG_INFO("Neighbour LLDP Address : {} Name : {} ", address, name);
         std::string sanitizedName = name;
         std::replace(sanitizedName.begin(), sanitizedName.end(), '-', '_');
-        AttestationDeviceIface::ResponderInfo responderInfo{sanitizedName, address,
-                                                            remotePort};
+        AttestationDeviceIface::ResponderInfo responderInfo{
+            sanitizedName, address, remotePort};
         attestationDevice.reset();
         attestationDevice = std::make_shared<AttestationDeviceIface>(
             conn, dbusServer, responderInfo, attestationHandler);
@@ -220,8 +220,8 @@ int main(int argc, const char* argv[])
             loadClientContext(clientcert, clientprivkey, caCert, self_signed);
         auto serverCtx =
             loadServerContext(servercert, serverprivkey, caCert, self_signed);
-        TcpStreamType acceptor(io_context.get_executor(), myip,
-                               port, serverCtx);
+        TcpStreamType acceptor(io_context.get_executor(), myip, port,
+                               serverCtx);
         EventQueue eventQueue(io_context.get_executor(), acceptor,
                               ssl_client_context, maxConnections);
         auto conn = std::make_shared<sdbusplus::asio::connection>(io_context);
@@ -251,14 +251,17 @@ int main(int argc, const char* argv[])
 
         auto neighbourHandler = createNeighbourHandler(
             io_context, conn, dbusServer, attestationHandler,
-            attestationResponder, attestationDevice, std::format("{}",port));
-        auto fallbackHandler = [&io_context,conn,iface,neighbourHandler](){
-            net::co_spawn(io_context,
-                      makeNeighbourUpdateHandler(conn, iface, neighbourHandler),
-                      net::detached);
+            attestationResponder, attestationDevice, std::format("{}", port));
+        auto fallbackHandler = [&io_context, conn, iface, neighbourHandler]() {
+            net::co_spawn(
+                io_context,
+                makeNeighbourUpdateHandler(conn, iface, neighbourHandler),
+                net::detached);
         };
         DbusSignalWatcher<sdbusplus::message_t>::watch(
-            io_context, conn, makeNeighbourDiscoveryHandler(neighbourHandler,std::move(fallbackHandler)),
+            io_context, conn,
+            makeNeighbourDiscoveryHandler(neighbourHandler,
+                                          std::move(fallbackHandler)),
             sdbusplus::bus::match::rules::interfacesAddedAtPath(
                 std::format(LLDP_REC_PATH, iface)));
 

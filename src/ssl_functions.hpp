@@ -7,7 +7,7 @@ using namespace reactor;
 namespace fs = std::filesystem;
 inline std::string trustStorePath()
 {
-    return std::format("{}etc/ssl/certs/authority/ca.pem", cert_root);
+    return std::format("{}etc/ssl/certs/authority", cert_root);
 }
 inline std::string ENTITY_CLIENT_CERT_PATH()
 {
@@ -47,7 +47,7 @@ std::optional<ssl::context> getClientContext()
             ssl_context.native_handle(),
             "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256");
 
-        ssl_context.load_verify_file(trustStorePath());
+        ssl_context.add_verify_path(trustStorePath());
         ssl_context.set_verify_mode(boost::asio::ssl::verify_peer);
         ssl_context.use_certificate_chain_file(ENTITY_CLIENT_CERT_PATH());
         ssl_context.use_private_key_file(CLIENT_PKEY_PATH(),
@@ -86,7 +86,7 @@ std::optional<ssl::context> getServerContext()
         ssl_context.use_certificate_chain_file(ENTITY_SERVER_CERT_PATH());
         ssl_context.use_private_key_file(SERVER_PKEY_PATH(),
                                          boost::asio::ssl::context::pem);
-        ssl_context.load_verify_file(trustStorePath());
+        ssl_context.add_verify_path(trustStorePath());
         ssl_context.set_verify_mode(
             boost::asio::ssl::verify_peer |
             boost::asio::ssl::verify_fail_if_no_peer_cert);

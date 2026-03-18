@@ -33,16 +33,16 @@ struct BmcResponder
             std::tie(ec, bytes) = co_await streamer.read(net::buffer(data));
             if (ec)
             {
-                if (ec == boost::asio::error::eof)
-                {
-                    LOG_ERROR("Error reading: {}", ec.message());
-                    watcherCallback(false);
-                    co_return;
-                }
                 if (ec == boost::asio::error::operation_aborted)
                 {
                     continue;
                 }
+                LOG_ERROR("Error reading: {}", ec.message());
+                if (watcherCallback)
+                {
+                    watcherCallback(false);
+                }
+                co_return;
             }
 
             LOG_INFO("Received: {}", std::string(data.data(), bytes));

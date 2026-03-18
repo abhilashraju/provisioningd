@@ -15,7 +15,7 @@ concept WatchHandler =
     };
 
 template <typename Derived, typename PropType>
-struct DbusWatcher
+struct DbusWatcher : std::enable_shared_from_this<Derived>
 {
     using PROPERTY_HANDLER =
         std::function<void(boost::system::error_code, PropType)>;
@@ -30,6 +30,13 @@ struct DbusWatcher
     DbusWatcher& operator=(DbusWatcher&&) = delete;
     DbusWatcher(std::shared_ptr<sdbusplus::asio::connection> conn) : conn(conn)
     {}
+    ~DbusWatcher()
+    {
+        LOG_DEBUG(
+            "DbusWatcher destructor called - cleaning up match and handler");
+        match.reset();
+        propHandler = nullptr;
+    }
 
     Derived& derived()
     {
@@ -143,6 +150,10 @@ struct DbusWatcher
     {
         propHandler(boost::asio::error::operation_aborted, PropType{});
     }
+    void removeMatch()
+    {
+        match.reset();
+    }
 };
 template <typename TYPE>
 struct DbusPropertyWatcher : public DbusWatcher<DbusPropertyWatcher<TYPE>, TYPE>
@@ -151,27 +162,46 @@ struct DbusPropertyWatcher : public DbusWatcher<DbusPropertyWatcher<TYPE>, TYPE>
     using PropType = TYPE;
     std::string propMatchRule;
     std::string propName;
-    DbusPropertyWatcher(std::shared_ptr<sdbusplus::asio::connection> conn,
-                        const std::string& path, const std::string& intf,
-                        const std::string& prop) : BASE(conn), propName(prop)
-    {
-        propMatchRule =
-            sdbusplus::bus::match::rules::propertiesChanged(path, intf);
-        addMatch();
-    }
+
+  private:
+    struct PrivateTag
+    {};
+
+  public:
     static std::shared_ptr<DbusPropertyWatcher<TYPE>> create(
         std::shared_ptr<sdbusplus::asio::connection> conn,
         const std::string& path, const std::string& intf,
         const std::string& prop)
     {
-        return std::make_shared<DbusPropertyWatcher<TYPE>>(conn, path, intf,
-                                                           prop);
+        auto watcher = std::make_shared<DbusPropertyWatcher<TYPE>>(
+            PrivateTag{}, conn, path, intf, prop);
+        watcher->addMatch();
+        return watcher;
     }
+
+    DbusPropertyWatcher(PrivateTag,
+                        std::shared_ptr<sdbusplus::asio::connection> conn,
+                        const std::string& path, const std::string& intf,
+                        const std::string& prop) : BASE(conn), propName(prop)
+    {
+        propMatchRule =
+            sdbusplus::bus::match::rules::propertiesChanged(path, intf);
+    }
+
+  private:
     void addMatch()
     {
-        BASE::match.emplace(
-            *BASE::conn, propMatchRule,
-            std::bind_front(&DbusPropertyWatcher::handlePropertyChange, this));
+        // Use weak_ptr to avoid use-after-free if watcher is destroyed
+        // while D-Bus callback is queued or executing
+        std::weak_ptr<DbusPropertyWatcher<TYPE>> weak =
+            BASE::derived().shared_from_this();
+        BASE::match.emplace(*BASE::conn, propMatchRule,
+                            [weak](sdbusplus::message_t& msg) {
+                                if (auto self = weak.lock())
+                                {
+                                    self->handlePropertyChange(msg);
+                                }
+                            });
     }
     void printChangedProperties(
         const std::map<std::string, std::variant<PropType>>& changedProperties)
@@ -219,25 +249,12 @@ struct DbusSignalWatcher : public DbusWatcher<DbusSignalWatcher<TYPE>, TYPE>
     using PropType = TYPE;
 
     std::string signalMatchRule;
-    DbusSignalWatcher(std::shared_ptr<sdbusplus::asio::connection> conn,
-                      const std::string& intf, const std::string& signal) :
-        BASE(conn)
 
-    {
-        signalMatchRule = std::format(
-            "type='signal',interface='{}',member='{}'", intf, signal);
-        addMatch();
-    }
-    DbusSignalWatcher(std::shared_ptr<sdbusplus::asio::connection> conn,
-                      const std::string& matchRule) : BASE(conn)
+  private:
+    struct PrivateTag
+    {};
 
-    {
-        signalMatchRule = matchRule;
-        addMatch();
-    }
-    DbusSignalWatcher(std::shared_ptr<sdbusplus::asio::connection> conn) :
-        BASE(conn)
-    {}
+  public:
     DbusSignalWatcher& nameOwnerChanged() noexcept
     {
         signalMatchRule = sdbusplus::bus::match::rules::nameOwnerChanged();
@@ -292,16 +309,48 @@ struct DbusSignalWatcher : public DbusWatcher<DbusSignalWatcher<TYPE>, TYPE>
     static std::shared_ptr<DbusSignalWatcher<TYPE>> create(
         std::shared_ptr<sdbusplus::asio::connection> conn, Args&&... args)
     {
-        return std::make_shared<DbusSignalWatcher<TYPE>>(
-            conn, std::forward<Args>(args)...);
+        auto watcher = std::make_shared<DbusSignalWatcher<TYPE>>(
+            PrivateTag{}, conn, std::forward<Args>(args)...);
+        watcher->addMatch();
+        return watcher;
     }
 
+    DbusSignalWatcher(PrivateTag,
+                      std::shared_ptr<sdbusplus::asio::connection> conn,
+                      const std::string& intf, const std::string& signal) :
+        BASE(conn)
+
+    {
+        signalMatchRule = std::format(
+            "type='signal',interface='{}',member='{}'", intf, signal);
+    }
+    DbusSignalWatcher(PrivateTag,
+                      std::shared_ptr<sdbusplus::asio::connection> conn,
+                      const std::string& matchRule) : BASE(conn)
+
+    {
+        signalMatchRule = matchRule;
+    }
+    DbusSignalWatcher(PrivateTag,
+                      std::shared_ptr<sdbusplus::asio::connection> conn) :
+        BASE(conn)
+    {}
+
+  private:
     void addMatch()
     {
         LOG_DEBUG("Adding signal match rule: {}", signalMatchRule);
-        BASE::match.emplace(
-            *BASE::conn, signalMatchRule,
-            std::bind_front(&DbusSignalWatcher::handleSignalChange, this));
+        // Use weak_ptr to avoid use-after-free if watcher is destroyed
+        // while D-Bus callback is queued or executing
+        std::weak_ptr<DbusSignalWatcher<TYPE>> weak =
+            BASE::derived().shared_from_this();
+        BASE::match.emplace(*BASE::conn, signalMatchRule,
+                            [weak](sdbusplus::message_t& msg) {
+                                if (auto self = weak.lock())
+                                {
+                                    self->handleSignalChange(msg);
+                                }
+                            });
     }
     void handleSignalChange(sdbusplus::message_t& msg)
     {

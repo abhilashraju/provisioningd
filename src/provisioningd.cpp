@@ -198,10 +198,9 @@ net::awaitable<void> onSpdmStateChange(
         co_return;
     }
     controller.setProvisioned(*val);
-    if (*val)
+    if (*val && !bmcResponder)
     {
         LOG_INFO("SPDM provisioning completed successfully");
-        bmcResponder.reset();
         auto sslContext = getServerContext();
         if (!sslContext)
         {
@@ -215,8 +214,7 @@ net::awaitable<void> onSpdmStateChange(
     LOG_INFO("SPDM provisioning completed with failed status");
 }
 net::awaitable<void> startSpdm(
-    sdbusplus::asio::connection& conn,
-    std::shared_ptr<DbusSignalWatcher<bool>> watcher, net::io_context& ioc,
+    std::shared_ptr<sdbusplus::asio::connection> conn, net::io_context& ioc,
     short port, const std::string& iface, ProvisioningController& controller,
     std::shared_ptr<BmcResponder>& bmcResponder, const std::string& deviceName)
 {
@@ -228,17 +226,22 @@ net::awaitable<void> startSpdm(
         auto device = std::format(ATTESTATION_DEVICE_PATH, deviceName);
         auto [ec, msg] =
             co_await awaitable_dbus_method_call<sdbusplus::message_t>(
-                conn, ATTESTATION_SVC, device, ATTESTATION_DEVICE_INTF,
+                *conn, ATTESTATION_SVC, device, ATTESTATION_DEVICE_INTF,
                 "attest");
+
         if (ec)
         {
             LOG_ERROR("Failed to start spdm: {}", ec.message());
         }
-        auto val = co_await watcher->watchOnce(30s);
+
+        auto watcher = DbusSignalWatcher<bool>::create(
+            conn, ATTESTATION_DEVICE_INTF, ATTESTATION_REQ_SIGNAL);
+        std::optional<bool> val = co_await watcher->watchOnce(30s);
+
         if (val && *val)
         {
             controller.peerProvisioned(true);
-            auto ip = co_await getRemoteIp(conn, iface);
+            auto ip = co_await getRemoteIp(*conn, iface);
             if (ip)
             {
                 net::co_spawn(ioc,
@@ -303,11 +306,8 @@ int main(int argc, const char* argv[])
         }
         controller.setProvisionHandler([&](const std::string& deviceName) {
             LOG_INFO("Provisioning started");
-            auto watcherPtr = std::make_shared<DbusSignalWatcher<bool>>(
-                conn, ATTESTATION_DEVICE_INTF, ATTESTATION_REQ_SIGNAL);
             net::co_spawn(io_context,
-                          std::bind_front(startSpdm, std::ref(*conn),
-                                          watcherPtr, std::ref(io_context),
+                          std::bind_front(startSpdm, conn, std::ref(io_context),
                                           port, iface, std::ref(controller),
                                           std::ref(bmcResponder), deviceName),
                           net::detached);

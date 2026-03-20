@@ -1,4 +1,5 @@
 #pragma once
+#include "pic_controller.hpp"
 #include "sdbus_calls.hpp"
 
 #include <xyz/openbmc_project/Common/error.hpp>
@@ -33,7 +34,7 @@ struct ProvisioningController : Ifaces
     std::array<PeerConnectionStatus, 2> trustedConnectionState{
         PeerConnectionStatus::NotDetermined,
         PeerConnectionStatus::NotDetermined};
-    bool provState{false};
+    PicController picController;
     using PROVISIONING_HANDLER = std::function<void(const std::string&)>;
     PROVISIONING_HANDLER provisionHandler;
 
@@ -81,8 +82,7 @@ struct ProvisioningController : Ifaces
     }
     bool provisioned() const override
     {
-        LOG_DEBUG("Provisioned state {}", provState);
-        return provState;
+        return picController.getState();
     }
     void setPeerConnected(PeerConnectionStatus value, ConnectionDirection dir)
     {
@@ -94,7 +94,7 @@ struct ProvisioningController : Ifaces
     void setProvisioned(bool value)
     {
         LOG_DEBUG("Setting Provisioned state {}", value);
-        provState = value;
+        picController.setState(value);
         Ifaces::provisioned(value, false);
     }
 

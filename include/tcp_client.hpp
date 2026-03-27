@@ -140,12 +140,14 @@ class TcpClient
 
     AwaitableResult<std::size_t> write(net::const_buffer data)
     {
-        co_return co_await streamer().write(data);
+        TimedStreamer streamer(stream_, timer_);
+        co_return co_await streamer.write(data, true);
     }
 
     AwaitableResult<std::size_t> read(net::mutable_buffer buffer)
     {
-        co_return co_await streamer().read(buffer);
+        TimedStreamer streamer(stream_, timer_);
+        co_return co_await streamer.read(buffer, true);
     }
     ssl::stream<tcp::socket>& stream()
     {

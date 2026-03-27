@@ -34,10 +34,10 @@ using PropertyValue = std::string;
 using DbusService = std::string;
 static int gRetryTime = 30;
 static int gRetryCount = 3;
-net::awaitable<void> waitFor(net::io_context& io_context,
+net::awaitable<void> waitFor(boost::asio::any_io_executor ctx,
                              std::chrono::seconds duration)
 {
-    net::steady_timer timer(io_context, duration);
+    net::steady_timer timer(ctx, duration);
     co_await timer.async_wait(net::use_awaitable);
 }
 net::awaitable<std::optional<std::string>> getRemoteIp(
@@ -53,40 +53,101 @@ net::awaitable<std::optional<std::string>> getRemoteIp(
     }
     co_return std::optional(propVal);
 }
+net::awaitable<bool> writeHello(TcpClient& client)
+{
+    std::string message("Hello");
+    int retryCount = 3;
+
+    while (retryCount > 0)
+    {
+        auto [ec, bytes] = co_await client.write(net::buffer(message));
+
+        if (!ec)
+        {
+            co_return true; // Success
+        }
+
+        if (ec == net::error::operation_aborted)
+        {
+            retryCount--;
+            LOG_INFO(
+                "Write operation timed out, retrying... ({} attempts left)",
+                retryCount);
+            continue;
+        }
+        else
+        {
+            LOG_ERROR("Connect error: {}", ec.message());
+            co_return false;
+        }
+    }
+    co_return false;
+}
+net::awaitable<bool> writePing(TcpClient& client)
+{
+    std::string ping("ping");
+    auto [ec, bytes] = co_await client.write(net::buffer(ping));
+
+    if (!ec)
+    {
+        co_return true; // Success
+    }
+
+    if (ec == net::error::operation_aborted)
+    {
+        LOG_INFO("Ping write operation timed out, continuing...");
+        co_return true; // Return true to continue the loop
+    }
+
+    LOG_ERROR("Send error: {}", ec.message());
+    co_return false; // Return false to exit the loop on other errors
+}
+net::awaitable<std::pair<std::optional<std::string>, bool>> read(
+    TcpClient& client, std::array<char, 1024>& buffer)
+{
+    auto [ec, bytes] = co_await client.read(net::buffer(buffer));
+
+    if (!ec)
+    {
+        co_return std::make_pair(std::string(buffer.data(), bytes), true);
+    }
+
+    if (ec == net::error::operation_aborted)
+    {
+        // LOG_INFO("Read operation timed out, continuing...");
+        co_return std::make_pair(std::nullopt, true); // Continue on timeout
+    }
+
+    LOG_ERROR("Receive error: {}", ec.message());
+    co_return std::make_pair(std::nullopt, false); // Exit on other errors
+}
 net::awaitable<bool> monitorBmc(net::io_context& io_context, TcpClient& client,
                                 bool needping = false)
 {
-    std::string message("Hello");
-    auto [ec, bytes] = co_await client.write(net::buffer(message));
-    if (ec)
+    if (!co_await writeHello(client))
     {
-        LOG_ERROR("Connect error: {}", ec.message());
         co_return false;
     }
     std::array<char, 1024> data{0};
     while (true)
     {
-        auto [ec, bytes] = co_await client.read(net::buffer(data));
-        if (ec)
+        auto [message, shouldContinue] = co_await read(client, data);
+        if (!shouldContinue)
         {
-            if (ec == net::error::operation_aborted)
-            {
-                continue;
-            }
-            LOG_ERROR("Receive error: {}", ec.message());
-            co_return false;
+            co_return false; // Exit on error
         }
-        LOG_INFO("Received from BMC: {}", std::string(data.data(), bytes));
+        if (!message)
+        {
+            continue; // Timeout, continue reading
+        }
+        LOG_INFO("Received from BMC: {}", *message);
         if (needping)
         {
-            std::string ping("ping");
-            auto [ecw, bytesw] = co_await client.write(net::buffer(ping));
-            if (ecw)
+            if (!co_await writePing(client))
             {
-                LOG_ERROR("Send error: {}", ecw.message());
-                co_return false;
+                co_return false; // Exit on error (not timeout)
             }
-            co_await waitFor(io_context, 5s);
+            co_await waitFor(io_context.get_executor(), 5s);
         }
     }
     co_return false;
@@ -115,10 +176,8 @@ net::awaitable<boost::system::error_code> connect(
             }
 
             // retry after delay
-            boost::asio::steady_timer timer(
-                co_await boost::asio::this_coro::executor);
-            timer.expires_after(std::chrono::seconds(gRetryTime));
-            co_await timer.async_wait(net::use_awaitable);
+            auto executor = co_await boost::asio::this_coro::executor;
+            co_await waitFor(executor, std::chrono::seconds(gRetryTime));
             continue;
         }
         break;
@@ -184,7 +243,7 @@ net::awaitable<void> onNeighbourFound(
         LOG_INFO("Peer already connected, skipping connection attempt");
         co_return;
     }
-    co_await waitFor(io_context, 15s);
+    co_await waitFor(io_context.get_executor(), 15s);
     co_await tryConnect(io_context, address, rport, controller);
     co_return;
 }

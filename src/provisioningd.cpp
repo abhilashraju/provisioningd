@@ -70,15 +70,10 @@ net::awaitable<bool> writeHello(TcpClient& client)
         if (ec == net::error::operation_aborted)
         {
             retryCount--;
-            if (retryCount > 0)
-            {
-                LOG_INFO(
-                    "Write operation timed out, retrying... ({} attempts left)",
-                    retryCount);
-                continue;
-            }
-            LOG_ERROR("Write operation timed out after 3 attempts");
-            co_return false;
+            LOG_INFO(
+                "Write operation timed out, retrying... ({} attempts left)",
+                retryCount);
+            continue;
         }
         else
         {

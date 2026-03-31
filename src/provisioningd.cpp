@@ -291,6 +291,7 @@ net::awaitable<void> startSpdm(
         if (ec)
         {
             LOG_ERROR("Failed to start spdm: {}", ec.message());
+            co_return;
         }
 
         auto watcher = DbusSignalWatcher<bool>::create(

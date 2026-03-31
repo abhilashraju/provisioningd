@@ -49,12 +49,18 @@ struct DbusWatcher : std::enable_shared_from_this<Derived>
     void startTimeout(net::steady_timer& timer, std::chrono::seconds timeout)
     {
         timer.expires_after(timeout);
-        timer.async_wait([this](const boost::system::error_code& ec) {
+        // Use weak_ptr to avoid use-after-free if watcher is destroyed
+        // while timer callback is queued or executing
+        std::weak_ptr<Derived> weak = derived().shared_from_this();
+        timer.async_wait([weak](const boost::system::error_code& ec) {
             if (!ec)
             {
-                cancelWatch();
-                LOG_ERROR(
-                    "Timeout occurred while waiting for SPDM property change");
+                if (auto self = weak.lock())
+                {
+                    self->cancelWatch();
+                    LOG_ERROR(
+                        "Timeout occurred while waiting for SPDM property change");
+                }
             }
         });
     }
